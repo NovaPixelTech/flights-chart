@@ -305,6 +305,25 @@ function buildTfs({ legs, trip, seat = "economy", adults = 1 }) {
  * ------------------------------------------------------------------ */
 const $ = (id) => document.getElementById(id);
 
+/* ------------------------------------------------------------------ *
+ *  Analytics (Umami) — optional, anonymous, and never allowed to break
+ *  the app. The tracker only loads when UMAMI_WEBSITE_ID is set in
+ *  config.js, and an ad-blocker simply makes these calls no-ops.
+ * ------------------------------------------------------------------ */
+const _trackQueue = [];
+function track(name, props) {
+  try {
+    if (window.umami?.track) { window.umami.track(name, props); return; }
+    // The tracker loads asynchronously; keep early events until it arrives.
+    if (window.UMAMI_WEBSITE_ID) _trackQueue.push([name, props]);
+  } catch (e) { /* analytics is best-effort */ }
+}
+window.addEventListener("load", () => {
+  try {
+    _trackQueue.splice(0).forEach(([name, props]) => window.umami?.track?.(name, props));
+  } catch (e) { /* ignore */ }
+});
+
 function _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function currentReader() {
@@ -2447,6 +2466,8 @@ let _automationTickTimer = null;
 let _autoProgress = null;          // live progress of that run, for the UI
 let _autoResumePending = false;    // an interrupted run is about to be continued
 let _searchInFlight = false;       // shared lock: a manual search OR an automation run
+let _manualSearchPromise = null;   // resolves when the manual search in flight ends
+let _autoPreempting = false;       // a “Run now” is waiting for the current search to stop
 let _editingAutomationId = null;
 let _autoDraftParams = null;       // criteria captured into the form, not yet saved
 
@@ -2872,10 +2893,21 @@ function hideRunScreen() {
 }
 
 /* ---------- actions ---------- */
-function runAutomationById(id, manual, resume) {
-  const a = _automations.find((x) => x.id === id);
-  if (!a) return Promise.resolve(false);
-  if (_searchInFlight) { autoStatus("A search is already running — try again when it finishes."); return Promise.resolve(false); }
+
+/** Ask whatever search is running (manual or automation) to stop, and resolve
+ *  once it has actually finished and released the shared engine lock. */
+function stopActiveSearchAndWait() {
+  const p = _manualSearchPromise || _automationRunPromise;
+  window._stopRequested = true;
+  if (!p) return Promise.resolve();
+  return Promise.resolve(p).catch(() => {});
+}
+
+function _startAutomationRun(a, manual, resume) {
+  if (_searchInFlight) {   // something else grabbed the engine while we waited
+    autoStatus("A search is already running — try again when it finishes.");
+    return Promise.resolve(false);
+  }
   const p = runAutomation(a, manual, resume)
     .catch(() => {})
     .then(() => { if (_automationRunPromise === p) _automationRunPromise = null; });
@@ -2883,13 +2915,59 @@ function runAutomationById(id, manual, resume) {
   return p;
 }
 
+async function runAutomationById(id, manual, resume) {
+  const a = _automations.find((x) => x.id === id);
+  if (!a) return false;
+
+  // Clicking “Run now” on the automation that is already running is a no-op.
+  if (_automationRunningId === id) {
+    autoStatus(`“${a.name}” is already running.`);
+    return _automationRunPromise ? await _automationRunPromise : false;
+  }
+
+  if (_searchInFlight) {
+    if (!manual) {
+      autoStatus("A search is already running — try again when it finishes.");
+      return false;
+    }
+    // A manual “Run now” has priority: stop whatever is running now and start
+    // this automation the moment the engine is free. Previously the click was
+    // simply refused, so the user had to wait for the earlier run (which may
+    // itself have been paused meanwhile) to finish first.
+    _autoPreempting = true;
+    autoStatus(`Stopping the current search so “${a.name}” can run now…`);
+    // Wait for the engine; if another search slipped in while we waited, stop
+    // that one too (bounded, so a misbehaving run cannot trap the click).
+    for (let guard = 0; guard < 5 && _searchInFlight; guard++) {
+      await stopActiveSearchAndWait();
+    }
+    _autoPreempting = false;
+    return _startAutomationRun(a, manual, resume);
+  }
+
+  return _startAutomationRun(a, manual, resume);
+}
+
 function toggleAutomation(id) {
   const a = _automations.find((x) => x.id === id);
   if (!a) return;
-  a.enabled = a.enabled === false;
+  const wasEnabled = a.enabled !== false;
+  a.enabled = !wasEnabled;
   saveAutomations();
   renderAutomations();
-  autoStatus(a.enabled ? `“${a.name}” enabled — ${nextRunText(a)}.` : `“${a.name}” paused.`);
+  if (!a.enabled) {
+    // Pausing an automation that is running right now must also stop that run,
+    // otherwise it keeps holding the engine lock and blocks the automation the
+    // user actually wants to run.
+    if (_automationRunningId === id) {
+      window._stopRequested = true;
+      autoStatus(`“${a.name}” paused — stopping its current run after the lookups in flight…`);
+      return;
+    }
+    autoStatus(`“${a.name}” paused.`);
+  } else {
+    autoStatus(`“${a.name}” enabled — ${nextRunText(a)}.`);
+  }
 }
 
 function deleteAutomation(id) {
@@ -2942,7 +3020,10 @@ async function runAllEnabled() {
   if (targets.length > 1 && typeof confirm === "function" &&
       !confirm(`Run all ${targets.length} enabled automations now? They run one after another and can take a while.`)) return;
   for (const a of targets) {
-    if (_searchInFlight) { autoStatus("Stopped — a search is already running."); return; }
+    // Re-check each time: the user may pause an automation while the batch is
+    // still running, in which case it must be skipped, not executed anyway.
+    const cur = _automations.find((x) => x.id === a.id);
+    if (!cur || cur.enabled === false) continue;
     await runAutomationById(a.id, true);
   }
 }
@@ -3210,11 +3291,13 @@ function automationTick() {
   refreshAutomationTimers();
   if (_automationTickTimer) { /* already scheduled */ }
   if (_autoResumePending) return;   // an interrupted run is being continued
+  if (_autoPreempting) return;      // a “Run now” is waiting to take the engine
   if (!_automations.length || _searchInFlight) return;
   // Resolving airport names needs the airport data, so wait until it is loaded.
   if (!Object.keys(AIRPORTS).length) return;
   const now = Date.now();
   const due = _automations.find((a) => a.enabled !== false && automationNextRunAt(a) <= now);
+  if (!due) return;   // nothing enabled is due (e.g. every automation is paused)
   runAutomationById(due.id, false);
 }
 
@@ -3477,6 +3560,17 @@ function wire() {
     window._currency = params.currency;
     saveSettings();
 
+    // Analytics: count manual searches, not the resumed continuation of one
+    // (that run was already counted when it started). No city/airport text is
+    // sent — only coarse properties.
+    if (!opts || !opts.resume) {
+      track("search-started", {
+        trip: params.ticket_type,
+        direct: params.direct_only ? "yes" : "no",
+        stay: `${params.min_days}-${params.max_days}`,
+      });
+    }
+
     const onLine = (p) => {
       setProgressTitle(p);
       const label = p.phase === "returns" ? "Loading return flights"
@@ -3501,17 +3595,43 @@ function wire() {
         `<br><span class="progress-sub">you can switch tabs or apps — the sweep keeps running in the background and a notification tells you when it's done${plan}${waiting}${eta}</span>`;
     };
 
+    let searchPromise = null;
     try {
-      const data = await runSearch(params, onLine, opts);
+      // Expose the promise so a manual “Run now” can stop this search and take
+      // over the engine instead of being refused while it runs.
+      searchPromise = runSearch(params, onLine, opts);
+      _manualSearchPromise = searchPromise;
+      const data = await searchPromise;
       renderResults(data);
       $("results").style.display = "block";
       notifyDone(data);
+
+      const lookups = data.searches_performed || 0;
+      track("search-completed", {
+        results: (data.all_results_count || 0) > 0 ? "yes" : "no",
+        lookups: lookups === 0 ? "0" : lookups < 10 ? "1-9" : lookups < 50 ? "10-49" : lookups < 200 ? "50-199" : "200+",
+        stopped: data.stopped_early ? "yes" : "no",
+      });
     } catch (err) {
+      // Bucket the failure instead of sending the raw message, which can
+      // contain the user's typed origin/destination.
+      const status = err && err.status;
+      const msg = String(err && err.message || "");
+      track("search-error", {
+        kind: status === 429 ? "rate-limit"
+          : status >= 500 ? "reader"
+          : /resolve/i.test(msg) ? "resolve"
+          : /find flight data|unexpected|parse/i.test(msg) ? "parse"
+          : /fetch|network/i.test(msg) ? "network"
+          : "other",
+      });
+
       $("errorBox").textContent = err.message || "Something went wrong";
       $("errorBox").style.display = "block";
       setFaviconMode("idle");
       setTabTitle(BASE_TITLE);
     } finally {
+      if (_manualSearchPromise === searchPromise) _manualSearchPromise = null;
       _searchInFlight = false;
       stopKeepAlive();
       resetStopConfirm();
@@ -3528,6 +3648,23 @@ function wire() {
     e.preventDefault();
     doSearch();
   });
+
+  // Analytics: which comparison partner people actually leave for. Delegated so
+  // it also covers links rendered later (results, archived runs, comparisons).
+  document.addEventListener("click", (e) => {
+    const a = e.target && typeof e.target.closest === "function"
+      ? e.target.closest("a[href]")
+      : null;
+    if (!a) return;
+    let host = "";
+    try { host = new URL(a.href, location.href).hostname.toLowerCase(); } catch (err) { return; }
+    const partner = host.includes("google.") ? "google-flights"
+      : host.endsWith("kiwi.com") ? "kiwi"
+      : host.includes("skyscanner.") ? "skyscanner"
+      : host.includes("gotogate.") ? "gotogate"
+      : null;
+    if (partner) track("outbound-click", { partner });
+  }, { capture: true });
 
   $("stopBtn").addEventListener("click", () => {
     // Verified stop: the first click only arms the button (and offers "Keep

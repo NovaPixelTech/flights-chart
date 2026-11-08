@@ -309,6 +309,13 @@
       <div id="flightResults"></div>
       <p class="note" id="resultNote"></p>
     </div>
+
+    <footer class="site-footer">
+      <span>Anonymous, cookieless analytics by
+        <a href="https://umami.is" target="_blank" rel="noopener noreferrer">Umami</a>
+        — no personal data, no cross-site tracking.</span>
+      <a href="./privacy.html">Privacy</a>
+    </footer>
   </div>
 
   <!-- The archived-run screen: a run's own results page, opened from an
@@ -331,6 +338,21 @@
   </div>
 
   <script src="./config.js?v=__BUILD__"></script>
+  <!-- Umami analytics: loaded only when UMAMI_WEBSITE_ID is set in config.js.
+       Cookieless and anonymous, so no consent banner is needed for normal use. -->
+  <script>
+    (function () {
+      var id = window.UMAMI_WEBSITE_ID;
+      var host = location.hostname;
+      // Never send local development traffic to the production dashboard.
+      if (!id || host === "localhost" || host === "127.0.0.1" || host === "[::1]") return;
+      var s = document.createElement("script");
+      s.async = true;
+      s.src = "https://cloud.umami.is/script.js";
+      s.setAttribute("data-website-id", id);
+      document.head.appendChild(s);
+    })();
+  </script>
   <script src="./app.js?v=__BUILD__"></script>
 </body>
 </html>

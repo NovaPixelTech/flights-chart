@@ -235,8 +235,11 @@ missed slot is **not** replayed N times: the automation is simply due and runs *
 the page is next opened. On iPhone/iPad the page must be installed to the home screen
 (*Share → Add to Home Screen*, iOS 16.4+) for notifications to appear. Automations also share a
 single reader quota and run **one at a time** — a manual search politely stops a running automation
-first. (A truly always-on schedule would need a keyed backend or a CI cron, which this project
-deliberately avoids.)
+first. **Run now** and **Pause** act immediately: pressing **Run now** on an automation stops whatever
+search is in flight (a manual search or another automation's run) and starts the chosen automation as
+soon as the engine is free, and pressing **Pause** on the automation that is currently running stops
+that run too, so it no longer holds up the queue. (A truly always-on schedule would need a keyed
+backend or a CI cron, which this project deliberately avoids.)
 
 Archives live in your browser's `localStorage`. If it fills up, the oldest archived runs are pruned
 automatically, so **export first** if you want to keep them.
@@ -282,11 +285,28 @@ Your site is live at `https://<user>.github.io/<repo>/`.
 | `RETURN_FETCH_LIMIT` | `16` | Minimum number of return-direction lookups spent on the displayed flights. It grows with the lookup ceiling (up to a fifth of it, max 200), since return lookups share the same per-minute quota as the date sweep. |
 | `SEARCH_CONCURRENCY` | `3` | How many reader requests may be in flight at once (the rate limiter still paces them). |
 | `SEARCH_TIME_BUDGET_MS` | `0` | Hard stop for a search in milliseconds. **`0` = no time limit** (only the Stop button ends a run); partial results are shown either way. |
+| `UMAMI_WEBSITE_ID` | `""` | Optional [Umami Cloud](https://cloud.umami.is) website ID for anonymous, cookieless analytics. **Blank disables analytics completely** — no request is made. |
 
 Visitors can override the reader, add their own key, change the lookup cap, and turn the
 **finish notification** or the **background keep-alive** on and off from the in-page
 **⚙️ Data source settings** panel (saved in their browser only). The same panel shows whether
 notifications are granted, blocked or unsupported, with a button to ask again.
+
+## Analytics (optional, free)
+
+The static app can report anonymous, cookieless usage stats through
+[Umami Cloud](https://cloud.umami.is) — the free Hobby plan includes 100K events/month,
+one website and 6 months of retention.
+
+1. Create a website in Umami and copy its **website ID**.
+2. Set `window.UMAMI_WEBSITE_ID` in `docs/config.js`.
+3. Deploy. No backend, account system or build step is involved.
+
+Tracked: page views, visitors, countries, referrers and devices, plus the events
+`search-started`, `search-completed`, `search-error` (category only) and `outbound-click`
+(Google Flights / Kiwi / Skyscanner / Gotogate). Origin, destination, dates and prices are
+never sent. Leave the ID blank to disable analytics entirely. The user-facing note lives in
+`docs/privacy.html`.
 
 ## Local development
 

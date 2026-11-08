@@ -69,3 +69,9 @@ window.RETURN_FETCH_LIMIT = 16;
 // Hard stop for a search in milliseconds; 0 = no time limit (only the Stop
 // button ends a run). Partial results are shown either way.
 window.SEARCH_TIME_BUDGET_MS = 0;
+
+// Optional analytics. Paste the website ID from cloud.umami.is here to enable
+// anonymous, cookieless traffic stats (visitors, countries, referrers) and the
+// product events fired in app.js (searches, partner-link clicks, errors).
+// Leave it blank to disable analytics completely — no request is made.
+window.UMAMI_WEBSITE_ID = "";

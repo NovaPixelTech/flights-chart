@@ -289,6 +289,34 @@ input:focus, select:focus {
   color: var(--muted);
   text-align: center;
 }
+.site-footer {
+  margin-top: 2.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem 1rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: center;
+}
+.site-footer a {
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.site-footer a:hover { color: var(--text); }
+.prose h2 {
+  margin-top: 1.75rem;
+  font-size: 1.05rem;
+  color: var(--text);
+}
+.prose h2:first-child { margin-top: 0; }
+.prose p, .prose ul { margin-top: 0.75rem; color: var(--muted); }
+.prose ul { padding-left: 1.25rem; }
+.prose li { margin-top: 0.35rem; }
+.prose a { color: var(--accent); }
 .empty {
   text-align: center;
   color: var(--muted);
