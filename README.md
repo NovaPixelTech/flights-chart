@@ -8,7 +8,8 @@ can mix airlines), or **both at once** and shown in their own sections so the tw
 are never conflated.
 Supports country inputs (expands to **every** commercial airport in that country — all of them
 are searched), explicit airport lists (`DUS, FRA, HAM`), flexible date windows, stay-length
-ranges, open-jaw (different return airport), and an optional **direct-only (nonstop)** filter.
+ranges, open-jaw (different return airport), a **departure-weekday filter** (e.g. only depart on
+Mondays), and an optional **direct-only (nonstop)** filter.
 Every result lists the **outbound and the return** flight (airport, `dd.mm.yyyy` date with the
 weekday, times, airline) plus the number of stay days. The results also carry a small card that
 **cross-checks the cheapest options on Google Flights (where Gotogate is listed), Kiwi.com and
@@ -148,6 +149,21 @@ leave.
 If a stay cannot fit the window at all (e.g. a 20-day stay in a 8-day window), the app says so
 instead of quietly returning nothing, and suggests widening the window, shortening the stay, or
 switching to *Departure date only*.
+
+## Departure weekday filter (outbound)
+
+**Departure day of week** restricts the search to outbound departures that leave on the weekdays
+you tick (e.g. **Mon** for "cheapest flight that departs on a Monday"). Tick several (e.g. Fri +
+Sat + Sun) to allow any of them; leave them all unchecked for any day (the default). It is one
+more criterion alongside the route, stay length, date window, direct-only and ticket type — all
+of them apply together, and the returned price is still the cheapest that satisfies the whole
+set.
+
+Because it removes departure dates before anything is looked up, it also makes a big sweep
+faster (only the chosen weekdays are queried). If no departure on the chosen weekday fits the
+window and stay length, the app says so and suggests another weekday, a wider window, a shorter
+stay, or *Departure date only*. The result header and the plain-language note both state which
+weekdays were searched.
 
 ## Cross-check on other sites (Google Flights, Kiwi.com, Skyscanner, Gotogate)
 
@@ -393,12 +409,15 @@ Earlier versions of this app used a Flask backend (`app.py`) that scrapes Google
 backend (Docker, Vercel, a VPS, …) — see `Dockerfile`, `requirements.txt` and `vercel.json` —
 but it is **no longer required**: the GitHub Pages app above is fully self-contained.
 
-### ⚠️ The Python backend does **not** have the "ticket type" feature yet
+### ⚠️ The Python backend does **not** have the "ticket type" or "departure weekday" features yet
 
-The static app (`docs/`) gained a **Round-trip vs. two separate one-ways** comparison, but
-`app.py` + `templates/index.html` were intentionally left untouched (it is the legacy path).
-If you ever want the Flask backend to match, here is exactly what to change — the static app is
-the reference implementation, so mirror it rather than inventing a new design.
+The static app (`docs/`) gained a **Round-trip vs. two separate one-ways** comparison and a
+**departure-weekday filter**, but `app.py` + `templates/index.html` were intentionally left
+untouched (it is the legacy path). If you ever want the Flask backend to match, here is exactly
+what to change — the static app is the reference implementation, so mirror it rather than
+inventing a new design. (For the weekday filter specifically: accept a `depart_days` array of
+`0`–`6` weekday indices in `api_search()`, and when building the sampled outbound dates, skip any
+date whose `date.weekday()` is not in that set — mirroring `runSearch()` in `docs/app.js`.)
 
 **Concept.** A *round-trip ticket* is a single booking priced from Google's round-trip response.
 *Two separate one-ways* is the sum of the cheapest one-way in each direction (often two different

@@ -46,7 +46,7 @@
         </svg>
         <span>Cheap Flights Finder</span>
       </h1>
-      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run</p>
+      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run</p>
       <div class="status-row">
         <span class="pill" id="dataPill"><span class="dot"></span><span id="dataPillText">data: live Google Flights</span></span>
         <span class="pill" id="airportPill"><span class="dot"></span><span id="airportPillText">airports: loading…</span></span>
@@ -97,6 +97,22 @@
               <option value="depart">Departure date only — the return may land after the window</option>
             </select>
             <div class="resolve-hint">“Whole trip” (default) means a departure that could not return inside the window is neither searched nor listed — the stay length sets the return date.</div>
+          </div>
+          <div class="full">
+            <label id="departDaysLabel">Departure day of week (outbound flight)</label>
+            <div class="day-picker" id="departDays" role="group" aria-labelledby="departDaysLabel">
+              <label class="day-chip"><input type="checkbox" value="1" /><span>Mon</span></label>
+              <label class="day-chip"><input type="checkbox" value="2" /><span>Tue</span></label>
+              <label class="day-chip"><input type="checkbox" value="3" /><span>Wed</span></label>
+              <label class="day-chip"><input type="checkbox" value="4" /><span>Thu</span></label>
+              <label class="day-chip"><input type="checkbox" value="5" /><span>Fri</span></label>
+              <label class="day-chip"><input type="checkbox" value="6" /><span>Sat</span></label>
+              <label class="day-chip"><input type="checkbox" value="0" /><span>Sun</span></label>
+            </div>
+            <div class="resolve-hint">Leave all unchecked for any day. Tick one or more weekdays to search
+              <strong>only departures that leave on those days</strong> (e.g. Monday) — combined with every
+              other criterion (route, stay length, window, direct-only, ticket type). This narrows the
+              departure dates that are searched, so a big sweep also gets faster.</div>
           </div>
           <div>
             <label for="date_mode">Date coverage</label>

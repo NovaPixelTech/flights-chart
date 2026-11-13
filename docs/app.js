@@ -686,6 +686,50 @@ function fmtDate(iso) {
   return `${weekdayAbbr(s)} ${m[3]}.${m[2]}.${m[1]}`;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Departure weekday filter (outbound)
+ * ------------------------------------------------------------------ *
+ *  The user may restrict the outbound departure to one or more weekdays
+ *  (e.g. only Mondays). Values are JS `Date.getDay()` indices: 0 = Sunday
+ *  … 6 = Saturday. An empty list means "any day".
+ * ------------------------------------------------------------------ */
+const DAY_ORDER = [1, 2, 3, 4, 5, 6, 0]; // Monday-first display order
+const DAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** 0 = Sunday … 6 = Saturday for an ISO date (matches Date.getDay()). */
+function weekdayIndex(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || "").slice(0, 10));
+  if (!m) return null;
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay();
+}
+
+/** Normalise a stored/form list of weekday indices to a sorted unique array. */
+function normalizeDepartDays(days) {
+  if (!Array.isArray(days)) return [];
+  const set = new Set();
+  for (const d of days) {
+    const n = Number(d);
+    if (Number.isInteger(n) && n >= 0 && n <= 6) set.add(n);
+  }
+  return DAY_ORDER.filter((d) => set.has(d));
+}
+
+/** "Mon, Fri" (Monday-first) for a list of weekday indices; "" for any/empty. */
+function departDaysLabel(days) {
+  const list = normalizeDepartDays(days);
+  if (!list.length || list.length === 7) return "";
+  return list.map((d) => _DOW[d]).join(", ");
+}
+
+/** "Monday" / "Monday and Friday" / "Mon, Wed and Fri" — for messages. */
+function departDaysLongLabel(days) {
+  const list = normalizeDepartDays(days);
+  if (!list.length || list.length === 7) return "";
+  const names = list.map((d) => DAY_LONG[d]);
+  if (names.length === 1) return names[0];
+  return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+}
+
 /** "Sun 06.12.2026 06:30" → { date: "Sun 06.12.2026", time: "06:30" }. */
 function _splitStamp(s) {
   const v = String(s || "").trim();
@@ -741,14 +785,19 @@ function parseISODate(s) {
   if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
   return new Date(parts[0], parts[1] - 1, parts[2]);
 }
-/** `count` evenly-spaced ISO dates across [start, end] (inclusive). */
-function spreadDates(start, end, count) {
-  const span = Math.round((end - start) / MS_DAY);
-  if (count <= 1 || span <= 0) return [isoLocal(start)];
+/**
+ * `count` evenly-spaced entries from an already-sorted list (e.g. the usable
+ * departure dates of one stay length). Sampling the list itself — rather than
+ * the whole [start, end] span — keeps partial coverage correct even when the
+ * usable dates are not contiguous, which is the case once a departure-weekday
+ * filter is applied.
+ */
+function spreadFromList(list, count) {
+  if (!list || !list.length) return [];
+  if (count <= 1) return [list[0]];
   const out = [];
-  for (let i = 0; i < count; i++) {
-    out.push(isoLocal(addDays(start, Math.round((i * span) / (count - 1)))));
-  }
+  const last = list.length - 1;
+  for (let i = 0; i < count; i++) out.push(list[Math.round((i * last) / (count - 1))]);
   return Array.from(new Set(out));
 }
 
@@ -1079,17 +1128,39 @@ async function runSearch(params, onProgress, opts) {
   // after the window is never searched (and never listed). Choosing
   // "Departure date only" lifts that, allowing a return after the window.
   const tripWindow = params.window_mode !== "depart";
+
+  // Outbound departure-weekday filter: empty = any day. When set, only
+  // departures that fall on one of these weekdays are searched/listed, so it
+  // narrows the departure dates of the whole grid (and speeds up a big sweep).
+  const departDays = normalizeDepartDays(params.depart_days);
+  // All seven ticked is the same as "any day", so it isn't treated as a filter.
+  const dayFilter = (departDays.length && departDays.length < 7) ? new Set(departDays) : null;
+  const daysLabel = departDaysLabel(departDays);
+
   const stayPlan = [];   // [{ stay, dates: [outbound ISO…], lastOut: Date }]
   for (let s = minDays; s <= maxDays; s++) {
     const lastOut = tripWindow ? addDays(end, -s) : end; // outbound + s days ≤ end
     if (lastOut < start) continue;                       // this stay could never finish in time
     const dates = [];
-    for (let d = new Date(start); d <= lastOut; d = addDays(d, 1)) dates.push(isoLocal(d));
+    for (let d = new Date(start); d <= lastOut; d = addDays(d, 1)) {
+      if (dayFilter && !dayFilter.has(d.getDay())) continue; // not a chosen weekday
+      dates.push(isoLocal(d));
+    }
+    if (!dates.length) continue; // no chosen weekday departure for this stay
     stayPlan.push({ stay: s, dates, lastOut });
   }
   if (!stayPlan.length) {
+    const stayText = minDays === maxDays ? minDays + "-day" : `${minDays}–${maxDays} day`;
+    if (dayFilter) {
+      throw new Error(
+        `No departure on ${departDaysLongLabel(departDays)} fits a ${stayText} stay inside the date window ` +
+        `${fmtDate(isoLocal(start))} – ${fmtDate(isoLocal(end))} (${windowDays} day${windowDays === 1 ? "" : "s"}). ` +
+        `Pick another weekday, widen the window, shorten the stay, or set “Date window applies to” → ` +
+        `“Departure date only” if the return is allowed to land after the window.`
+      );
+    }
     throw new Error(
-      `A ${minDays === maxDays ? minDays + "-day" : `${minDays}–${maxDays} day`} stay cannot start and finish inside ` +
+      `A ${stayText} stay cannot start and finish inside ` +
       `the date window ${fmtDate(isoLocal(start))} – ${fmtDate(isoLocal(end))} (${windowDays} day${windowDays === 1 ? "" : "s"}). ` +
       `Widen the window (at least ${minDays + 1} days), shorten the stay, or set “Date window applies to” → ` +
       `“Departure date only” if the return is allowed to land after the window.`
@@ -1180,7 +1251,7 @@ async function runSearch(params, onProgress, opts) {
         : (fullGrid <= lookupCeiling
           ? p.dates.length // everything fits — sweep every day, exhaustively
           : Math.max(1, Math.min(p.dates.length, datesWeCanAfford)));
-      _broadCache.set(p.stay, new Set(spreadDates(start, p.lastOut, n)));
+      _broadCache.set(p.stay, new Set(spreadFromList(p.dates, n)));
     }
     return _broadCache.get(p.stay);
   };
@@ -1252,7 +1323,8 @@ async function runSearch(params, onProgress, opts) {
   const ojTasks = [];
   if (params.open_jaw && orgs.length > 1) {
     const top = orgs.slice(0, 5);
-    const ob = allDates[0];
+    // Respect the departure-weekday filter for the open-jaw outbound too.
+    const ob = (sweepDates.length ? sweepDates[0] : allDates[0]);
     const stay = stayLengths[0];
     const ret = isoLocal(addDays(parseISODate(ob), stay));
     let added = 0;
@@ -1364,6 +1436,7 @@ async function runSearch(params, onProgress, opts) {
       if (!f || !f.origin_airport || !f.outbound_date) continue;
       if (!orgSet.has(f.origin_airport) || !dstSet.has(f.dest_airport)) continue;
       if (f.outbound_date < firstDate || f.outbound_date > lastDate) continue;
+      if (dayFilter && !dayFilter.has(weekdayIndex(f.outbound_date))) continue;
       if (f.stay_days != null && (f.stay_days < minDays || f.stay_days > maxDays)) continue;
       // Under the trip window a restored option must still return inside it.
       if (tripWindow && f.stay_days != null) {
@@ -1628,11 +1701,16 @@ async function runSearch(params, onProgress, opts) {
   const windowNote = (() => {
     const from = fmtDate(isoLocal(start));
     const to = fmtDate(isoLocal(end));
+    const dayNote = dayFilter
+      ? ` Departures are restricted to ${departDaysLongLabel(departDays)} only.`
+      : "";
     if (!tripWindow) {
-      return `Date window covers the departure date only — a return may land after ${to}.`;
+      return `Date window covers the departure date only — a return may land after ${to}.${dayNote}`;
     }
     let s = `Trip window: every listed flight departs and returns inside ${from} – ${to}`;
-    if (sweepDates.length < windowDays) {
+    // Only attribute the shortened range to the stay when it isn't simply the
+    // weekday filter (that has its own sentence, appended below).
+    if (!dayFilter && sweepDates.length < windowDays) {
       s += `, so departures run ${from} – ${fmtDate(sweepDates[sweepDates.length - 1])} ` +
         `(a ${stayLabel} stay cannot start later and still return in time)`;
     }
@@ -1641,7 +1719,7 @@ async function runSearch(params, onProgress, opts) {
       s += ` ${staysDropped} of ${askedStays} stay length${askedStays === 1 ? "" : "s"} could not fit ` +
         `and ${staysDropped === 1 ? "was" : "were"} skipped.`;
     }
-    return s;
+    return s + dayNote;
   })();
 
   return {
@@ -1670,6 +1748,8 @@ async function runSearch(params, onProgress, opts) {
     dates_sweepable: sweepDates.length,
     window_mode: tripWindow ? "trip" : "depart",
     window_note: windowNote,
+    depart_days: departDays,
+    depart_days_label: daysLabel,
     stays_checked: sweptStays.size,
     stays_requested: stayLengths.length,
     stays_asked: askedStays,
@@ -1708,8 +1788,10 @@ async function runSearch(params, onProgress, opts) {
           "“Departure date only” to allow a later return). "
         : "The date window applies to the departure date only, so a listed return may land after the window. ") +
       (fullGrid <= lookupCeiling && !stopped
-        ? "This search was EXHAUSTIVE: every airport pair, every stay length and every departure date that fits the " +
-          `window was looked up (${fullGrid} lookups), so the cheapest option listed really is the cheapest on offer. `
+        ? "This search was EXHAUSTIVE: every airport pair, every stay length and every " +
+          (dayFilter ? `${departDaysLongLabel(departDays)} ` : "") +
+          `departure date that fits the window was looked up (${fullGrid} lookups), so the cheapest option listed ` +
+          "really is the cheapest on offer. "
         : stopped
           ? "This run was stopped early, so the grid was only partly swept — the results below are what had been " +
             "found by then; run it again (or resume) to complete the coverage. "
@@ -1730,6 +1812,10 @@ async function runSearch(params, onProgress, opts) {
           "baggage/change rules. "
         : "") +
       (params.direct_only ? "Only nonstop itineraries were requested. " : "") +
+      (dayFilter
+        ? `Only outbound departures on ${departDaysLongLabel(departDays)} were searched, so departure dates ` +
+          "on other weekdays were neither looked up nor listed. "
+        : "") +
       "Open-jaw totals are estimated from two separate one-ways.",
   };
 }
@@ -2008,10 +2094,11 @@ function renderResults(data, where) {
     <span>Airports: ${originList || "—"} → ${destList || "—"}</span>
     <span>Window <strong>${fmtDate(data.date_from)}</strong> – <strong>${fmtDate(data.date_to)}</strong> · Stay <strong>${data.min_days}–${data.max_days}</strong> days${data.window_mode === "depart" ? " · window = departure date" : " · whole trip inside the window"}</span>
     ${data.ticket_type ? `<span>Ticket: <strong>${data.ticket_type === "both" ? "round-trip + two separate one-ways" : data.ticket_type === "oneway" ? "two separate one-ways" : "round-trip"}</strong></span>` : ""}
+    ${data.depart_days_label ? `<span>Departure day: <strong>${_esc(data.depart_days_label)}</strong> only</span>` : ""}
     ${data.direct_only ? `<span>Direct (nonstop) only</span>` : ""}
     <span>${data.searches_performed || 0} lookups · ${data.all_results_count || 0} options found${data.stopped_early ? (data.stopped_by_user ? " · partial (stopped by you)" : " · partial (time limit)") : ""}</span>
     ${data.exhaustive && !data.safety_capped && !data.stopped_early
-      ? `<span class="coverage-complete">Exhaustive: every airport pair × every stay length × <strong>every departure date that fits the window</strong> (${data.grid_total} lookups) — the cheapest option listed is the cheapest on offer</span>`
+      ? `<span class="coverage-complete">Exhaustive: every airport pair × every stay length × <strong>every ${data.depart_days_label ? _esc(data.depart_days_label) + " " : ""}departure date that fits the window</strong> (${data.grid_total} lookups) — the cheapest option listed is the cheapest on offer</span>`
       : ""}
     ${data.pairs_available ? `<span>Coverage: <strong>${data.pairs_searched}/${data.pairs_available}</strong> airport pairs · <strong>${data.dates_checked}/${data.dates_sweepable != null ? data.dates_sweepable : data.dates_in_window}</strong> departure dates · <strong>${data.stays_checked}/${data.stays_requested}</strong> stay lengths${data.safety_capped ? ` · grid is ${data.grid_total} lookups, capped at ${data.lookup_ceiling} (raise ⚙️ Lookup ceiling)` : ""}</span>` : ""}
     ${data.window_note ? `<span class="window-note">${data.window_note}</span>` : ""}
@@ -2402,6 +2489,38 @@ function stopKeepAlive() {
   try { if (_keepAudio) { _keepAudio.pause(); _keepAudio.currentTime = 0; } } catch (e) {}
 }
 
+/** Highlight the ticked weekday chips (also works where `:has` is unsupported). */
+function syncDayChips() {
+  const wrap = $("departDays");
+  if (!wrap) return;
+  wrap.querySelectorAll("label.day-chip").forEach((lbl) => {
+    const c = lbl.querySelector('input[type="checkbox"]');
+    lbl.classList.toggle("on", !!(c && c.checked));
+  });
+}
+
+/** The ticked departure weekdays as a sorted Monday-first array of 0–6. */
+function readDepartDays() {
+  const wrap = $("departDays");
+  if (!wrap) return [];
+  const days = [];
+  wrap.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    if (c.checked) days.push(parseInt(c.value, 10));
+  });
+  return normalizeDepartDays(days);
+}
+
+/** Tick exactly the given departure weekdays ([] = any day). */
+function setDepartDays(days) {
+  const wrap = $("departDays");
+  if (!wrap) return;
+  const want = new Set(normalizeDepartDays(days));
+  wrap.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    c.checked = want.has(parseInt(c.value, 10));
+  });
+  syncDayChips();
+}
+
 /** Fill the form from a stored params object (used when resuming a search). */
 function applyParamsToForm(p) {
   const set = (id, v) => { if ($(id) != null && v != null) $(id).value = v; };
@@ -2416,6 +2535,7 @@ function applyParamsToForm(p) {
   set("currency", p.currency);
   set("open_jaw", p.open_jaw ? "true" : "false");
   set("ticket_type", p.ticket_type);
+  setDepartDays(p.depart_days);
   const dc = $("direct_only");
   if (dc) dc.checked = !!p.direct_only;
   syncDateBounds(false);
@@ -2437,6 +2557,7 @@ function readFormParams() {
     open_jaw: $("open_jaw").value === "true",
     ticket_type: $("ticket_type") ? $("ticket_type").value : "roundtrip",
     direct_only: $("direct_only") ? $("direct_only").checked : false,
+    depart_days: readDepartDays(),
   };
 }
 
@@ -2637,6 +2758,8 @@ function autoCriteriaText(p) {
   ];
   if (p.direct_only) bits.push("direct only");
   if (p.open_jaw) bits.push("open-jaw allowed");
+  const ddLabel = departDaysLabel(p.depart_days);
+  if (ddLabel) bits.push("departs " + ddLabel);
   bits.push(p.date_mode === "every" ? "exhaustive dates" : "sampled dates");
   return `<strong>Criteria:</strong> ${bits.filter(Boolean).join(" · ")}`;
 }
@@ -3477,6 +3600,13 @@ function wire() {
   }
   syncDateBounds(false);
 
+  // Departure weekday chips: keep the highlighted state in sync as they toggle.
+  if ($("departDays")) {
+    $("departDays").addEventListener("change", syncDayChips);
+    $("departDays").addEventListener("input", syncDayChips);
+    syncDayChips();
+  }
+
   bindResolveHint("origin", "originHint");
   bindResolveHint("destination", "destinationHint");
 
@@ -3568,6 +3698,7 @@ function wire() {
         trip: params.ticket_type,
         direct: params.direct_only ? "yes" : "no",
         stay: `${params.min_days}-${params.max_days}`,
+        depart_days: (params.depart_days && params.depart_days.length) ? "filtered" : "any",
       });
     }
 

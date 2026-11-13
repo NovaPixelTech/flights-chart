@@ -136,6 +136,42 @@ input:focus, select:focus {
   font-size: 0.78rem;
   color: var(--muted);
 }
+/* Departure weekday filter: a row of toggle chips (Mon–Sun). */
+.day-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.day-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: #0f172a;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.day-chip input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.day-chip:has(input:checked),
+.day-chip.on {
+  border-color: var(--accent);
+  background: #0b2b3f;
+}
 /* Capitals-only city/country fields: the value is upper-cased in JS as it is
    typed, and this guarantees the *display* is capital even for autofill/paste. */
 .upper { text-transform: uppercase; }
