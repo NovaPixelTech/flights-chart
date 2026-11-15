@@ -2073,6 +2073,7 @@ function _compareCard(data, currency) {
  *  archived-run screen, which is a separate page and needs its own ids. */
 const MAIN_RESULT_IDS = { meta: "resultMeta", list: "flightResults", note: "resultNote" };
 const RUN_SCREEN_RESULT_IDS = { meta: "runScreenMeta", list: "runScreenResults", note: "runScreenNote" };
+const SAVED_SCREEN_RESULT_IDS = { meta: "savedScreenMeta", list: "savedScreenResults", note: "savedScreenNote" };
 
 /** Look an element up inside an optional root (defaults to the document). */
 function _inRoot(root, id) {
@@ -2974,6 +2975,18 @@ function showRunScreen(a, run, data) {
   const rs = $("runScreen");
   const s = (run && run.summary) || {};
   const best = s.best;
+  // Remember what is on screen so it can be parked in Saved searches (the whole
+  // result set plus the criteria that produced it).
+  _lastResults = data
+    ? {
+      data,
+      params: (run && run.params) || automationRunParams(a),
+      at: (run && run.at) || Date.now(),
+      source: "automation",
+      sourceLabel: `automation “${a ? a.name : "Automation"}” run ${run ? runNumber(a, run) : ""}`.trim(),
+    }
+    : null;
+  updateSaveButton();
   if (!rs) {   // markup missing — fall back to the main results area
     if (data) { renderResults(Object.assign({}, data, { note: runScreenNote(a, run, data) })); }
     if ($("results")) $("results").style.display = "block";
@@ -3012,6 +3025,10 @@ function hideRunScreen() {
   const rs = $("runScreen");
   if (!rs) return;
   rs.style.display = "none";
+  // Whatever was on that screen is gone — the main results toolbar must not
+  // offer to save it any more.
+  _lastResults = null;
+  updateSaveButton();
   try { document.body.classList.remove("run-screen-open"); } catch (e) {}
 }
 
@@ -3518,6 +3535,576 @@ function initAutomations() {
   refreshAutomationTimers();
 }
 
+/* ==================================================================== *
+ *  Saved searches (favorites)
+ *
+ *  A saved search is a whole result set parked exactly as it came back, plus
+ *  the parameters that produced it — so it can be shown again later, or re-run
+ *  with the identical criteria. Everything lives in localStorage (this browser
+ *  only) and is grouped the way a person looks for it: destination (country or
+ *  city), then departure month, then the date the search was made.
+ * ==================================================================== */
+const SAVED_KEY = "flightschart.saved.v1";
+const SAVED_MAX = 40;              // newest kept, oldest pruned past this
+const SAVED_MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+  "August", "September", "October", "November", "December"];
+
+let _saved = [];
+let _lastResults = null;      // { data, params, at, source, sourceLabel, savedId }
+let _savedFilter = "";
+let _savedScreenId = null;    // which saved search the full-screen view shows
+let _doSearchFromForm = null; // set by wire(): runs a search from the form
+
+function newSavedId() {
+  return "save_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
+}
+
+function savedStatus(text) {
+  const el = $("savedStatus");
+  if (el) el.textContent = text || "";
+}
+
+/* ---------- grouping keys ---------- */
+/** "2026-12" for an ISO date, or "unknown". */
+function monthKey(iso) {
+  const s = String(iso || "").slice(0, 7);
+  return /^\d{4}-\d{2}$/.test(s) ? s : "unknown";
+}
+
+/** "December 2026" for an ISO date. */
+function monthLabel(iso) {
+  const k = monthKey(iso);
+  if (k === "unknown") return "Month not set";
+  const m = /^(\d{4})-(\d{2})$/.exec(k);
+  return `${SAVED_MONTHS[Math.max(0, Math.min(11, Number(m[2]) - 1))]} ${m[1]}`;
+}
+
+/** Local calendar day of a timestamp, as "YYYY-MM-DD". */
+function savedDayKey(ms) {
+  const d = new Date(ms || 0);
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`;
+}
+
+/** "Sun 15.11.2026" for a timestamp. */
+function savedDayLabel(ms) {
+  return fmtDate(savedDayKey(ms));
+}
+
+/** "14:03" (local) for a timestamp. */
+function savedTimeLabel(ms) {
+  const d = new Date(ms || 0);
+  return `${_pad2(d.getHours())}:${_pad2(d.getMinutes())}`;
+}
+
+/**
+ * How a saved search is filed under "destination": the country when the
+ * destination is a country or a list, the single city when it is one city, and
+ * whatever was typed when nothing resolves. `sub` is the supporting line
+ * (airport codes, country, or the raw input).
+ */
+function savedDestInfo(params, data) {
+  const input = String((params && params.destination) || "").trim().toUpperCase();
+  const list = (data && Array.isArray(data.destinations_searched)) ? data.destinations_searched : [];
+  const codes = [], cities = [], countries = [];
+  const push = (arr, v) => {
+    const s = String(v == null ? "" : v).trim();
+    if (s && arr.indexOf(s) === -1) arr.push(s);
+  };
+  list.forEach((a) => { push(codes, a.code); push(cities, a.city); push(countries, a.country); });
+  if (!codes.length) {
+    try { resolveLocations(input).forEach((c) => push(codes, c)); } catch (e) { /* keep what we have */ }
+  }
+
+  let label = input || "Anywhere";
+  if (cities.length === 1) label = cities[0];
+  else if (countries.length === 1) label = countries[0];
+
+  const subBits = [];
+  if (codes.length) subBits.push(codes.join(", "));
+  if (countries.length === 1) {
+    if (countries[0].toUpperCase() !== label.toUpperCase()) subBits.push(countries[0]);
+  } else if (countries.length > 1) {
+    subBits.push(countries.join(" / "));
+  }
+  if (!codes.length && input && input !== label.toUpperCase()) subBits.push(input);
+
+  return { key: label.toUpperCase(), label, sub: subBits.join(" · ") };
+}
+
+/** Plain-text description of the criteria (for the filter box). */
+function savedCriteriaText(p) {
+  p = p || {};
+  const bits = [
+    p.origin, p.destination, p.date_from, p.date_to, p.currency,
+    p.ticket_type, p.window_mode === "depart" ? "departure date only" : "whole trip",
+    p.date_mode === "every" ? "exhaustive" : "sampled",
+    departDaysLongLabel(p.depart_days),
+    p.direct_only ? "direct only" : "",
+    p.open_jaw ? "open-jaw" : "",
+  ];
+  return bits.filter(Boolean).join(" ").toLowerCase();
+}
+
+function savedSearchText(e) {
+  return [e.destLabel, e.destSub, e.monthLabel, savedDayLabel(e.savedAt || 0), e.sourceLabel,
+    savedCriteriaText(e.params)].join(" ").toLowerCase();
+}
+
+/** "manual search" / "automation “watch” run #3" — where the result set came from. */
+function savedSourceLabel(e) {
+  if (!e) return "";
+  if (e.source === "automation") return e.sourceLabel || "automation run";
+  return "manual search";
+}
+
+/* ---------- storage ---------- */
+function loadSaved() {
+  let list = [];
+  try {
+    const raw = window.localStorage && window.localStorage.getItem(SAVED_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && Array.isArray(parsed.searches)) list = parsed.searches;
+  } catch (e) { list = []; }
+  _saved = list.filter((e) => e && typeof e === "object" && e.data);
+  _saved.forEach((e) => {
+    if (!e.id) e.id = newSavedId();
+    if (!e.params || typeof e.params !== "object") e.params = {};
+    if (!e.savedAt) e.savedAt = Date.now();
+    if (!e.destKey || !e.destLabel) {
+      const g = savedDestInfo(e.params, e.data);
+      e.destKey = e.destKey || g.key;
+      e.destLabel = e.destLabel || g.label;
+      e.destSub = e.destSub || g.sub;
+    }
+    if (!e.monthKey) {
+      e.monthKey = monthKey(e.data.date_from);
+      e.monthLabel = monthLabel(e.data.date_from);
+    }
+    if (!e.summary) e.summary = summarizeRun(e.data);
+  });
+  _saved.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  if (_saved.length > SAVED_MAX) _saved.length = SAVED_MAX;
+}
+
+function _savedJson() {
+  return JSON.stringify({ v: 1, saved: Date.now(), searches: _saved });
+}
+
+/** Persist, pruning the oldest saved searches if the browser quota says no. */
+function saveSaved() {
+  if (_saved.length > SAVED_MAX) _saved.length = SAVED_MAX;
+  try {
+    localStorage.setItem(SAVED_KEY, _savedJson());
+    return true;
+  } catch (e) {
+    // Storage full — drop the oldest saved search until it fits, so a save
+    // never fails because of a fat history.
+    for (let guard = 0; guard < SAVED_MAX + 5 && _saved.length > 1; guard++) {
+      _saved.pop();
+      try { localStorage.setItem(SAVED_KEY, _savedJson()); return true; } catch (e2) { /* keep pruning */ }
+    }
+    savedStatus("This browser's storage is full — export your saved searches and delete some.");
+    return false;
+  }
+}
+
+/* ---------- building an entry ---------- */
+/** Everything the renderer needs, minus a couple of fields nothing displays. */
+function slimSavedData(data) {
+  let copy;
+  try { copy = JSON.parse(JSON.stringify(data || {})); } catch (e) { return data || null; }
+  delete copy.sample_outbounds;   // a duplicate of dates_checked, never rendered
+  if (Array.isArray(copy.ranked_options) && copy.ranked_options.length > 50) copy.ranked_options.length = 50;
+  return copy;
+}
+
+function buildSavedEntry(ref) {
+  const data = ref.data || {};
+  const params = Object.assign({}, ref.params || {});
+  const dest = savedDestInfo(params, data);
+  const from = data.date_from || params.date_from || null;
+  const at = ref.at || Date.now();
+  return {
+    id: newSavedId(),
+    savedAt: at,
+    source: ref.source || "search",
+    sourceLabel: ref.sourceLabel || "manual search",
+    params,
+    destKey: dest.key,
+    destLabel: dest.label,
+    destSub: dest.sub,
+    monthKey: monthKey(from),
+    monthLabel: monthLabel(from),
+    summary: summarizeRun(data),
+    data: slimSavedData(data),
+  };
+}
+
+/* ---------- actions ---------- */
+/** The button state for "save what is on screen" (results and run screen). */
+function updateSaveButton() {
+  const b = $("saveSearchBtn");
+  if (b) {
+    const has = !!(_lastResults && _lastResults.data);
+    const saved = has && !!_lastResults.savedId;
+    b.style.display = has ? "inline-flex" : "none";
+    b.textContent = saved ? "★ Saved to Saved searches" : "☆ Save this search to Saved searches";
+    b.disabled = !!saved;
+    b.title = saved
+      ? "This result set is already in Saved searches."
+      : "Park this whole result set — flights, prices and criteria — in Saved searches.";
+  }
+  const rb = $("runScreenSave");
+  if (rb) {
+    const has = !!(_lastResults && _lastResults.data && _lastResults.source === "automation");
+    const saved = has && !!_lastResults.savedId;
+    rb.style.display = has ? "inline-flex" : "none";
+    rb.textContent = saved ? "★ Saved" : "☆ Save this run";
+    rb.disabled = !!saved;
+  }
+}
+
+/** Park whatever search is on screen right now. */
+function saveCurrentResults() {
+  const ref = _lastResults;
+  if (!ref || !ref.data) { savedStatus("Run a search first — there is nothing to save yet."); return; }
+  if (ref.savedId) { savedStatus("This result set is already saved."); return; }
+
+  const entry = buildSavedEntry(ref);
+  _saved.unshift(entry);
+  if (_saved.length > SAVED_MAX) _saved.length = SAVED_MAX;
+
+  if (!saveSaved()) {                       // quota pruned it away — undo the in-memory add
+    _saved = _saved.filter((x) => x.id !== entry.id);
+    renderSaved();
+    return;
+  }
+  ref.savedId = entry.id;
+  updateSaveButton();
+  renderSaved();
+  savedStatus(`Saved under ${entry.destLabel} · ${entry.monthLabel} · ${savedDayLabel(entry.savedAt)}.`);
+  track("saved-search", { action: "save", source: entry.source });
+}
+
+function deleteSaved(id) {
+  const e = _saved.find((x) => x.id === id);
+  if (!e) return;
+  const what = `${(e.params && e.params.origin) || "?"} → ${(e.params && e.params.destination) || "?"}` +
+    ` · ${e.monthLabel || ""} · saved ${new Date(e.savedAt || 0).toLocaleString()}`;
+  if (typeof confirm === "function" && !confirm(`Delete this saved search?\n\n${what}`)) return;
+  _saved = _saved.filter((x) => x.id !== id);
+  saveSaved();
+  renderSaved();
+  if (_savedScreenId === id) hideSavedScreen();
+  savedStatus("Saved search deleted.");
+  track("saved-search", { action: "delete" });
+}
+
+function clearSaved() {
+  if (!_saved.length) { savedStatus("Nothing saved yet."); return; }
+  if (typeof confirm === "function" &&
+      !confirm(`Delete all ${_saved.length} saved search(es)? This cannot be undone (export first if you want a copy).`)) return;
+  _saved = [];
+  saveSaved();
+  renderSaved();
+  hideSavedScreen();
+  savedStatus("All saved searches deleted.");
+}
+
+/* ---------- rendering ---------- */
+function updateSavedBadge() {
+  const el = $("savedBadge");
+  if (!el) return;
+  el.textContent = _saved.length ? `${_saved.length} saved` : "none";
+  el.className = "saved-badge" + (_saved.length ? " on" : "");
+}
+
+/** One line of plain text about the cheapest flight in a saved result set. */
+function savedBestLine(e) {
+  const s = (e && e.summary) || {};
+  const best = s.best;
+  if (!best || best.price == null) return "no flights were found in this search";
+  const bits = [`cheapest ${best.price} ${s.currency || best.currency || ""}`.trim(), best.route, best.when];
+  if (best.airline) bits.push(best.airline);
+  if (best.ticket) bits.push(best.ticket);
+  if (best.stops === 0) bits.push("direct");
+  return bits.filter(Boolean).join(" · ");
+}
+
+function savedItemHtml(e) {
+  const s = (e && e.summary) || {};
+  const best = s.best;
+  const price = best && best.price != null
+    ? `<span class="saved-item-price">${_esc(best.price)} ${_esc(s.currency || best.currency || "")}</span>`
+    : `<span class="saved-item-price muted">no flights</span>`;
+  const src = e.source === "automation" ? `<span class="saved-source">automation</span>` : "";
+  return `<div class="saved-item">
+    <div class="saved-item-top">
+      <span class="saved-item-route">${_esc((e.params && e.params.origin) || "?")} → ${_esc((e.params && e.params.destination) || "?")}</span>
+      ${price}
+      ${src}
+      <span class="saved-item-time">${_esc(savedTimeLabel(e.savedAt))}</span>
+    </div>
+    <div class="saved-item-meta">${_esc(savedBestLine(e))}</div>
+    <div class="saved-item-meta">${autoCriteriaText(e.params)}</div>
+    <div class="saved-item-meta">Saved from ${_esc(savedSourceLabel(e))}</div>
+    <div class="saved-item-actions">
+      <button type="button" class="btn-mini" data-saved-show="${_esc(e.id)}">Show results</button>
+      <button type="button" class="btn-mini ghost" data-saved-rerun="${_esc(e.id)}">Search again (same criteria)</button>
+      <button type="button" class="btn-mini ghost" data-saved-del="${_esc(e.id)}">Delete</button>
+    </div>
+  </div>`;
+}
+
+/** destination → departure month → search date, each level sorted newest first. */
+function savedGroups(items) {
+  const dests = new Map();
+  items.forEach((e) => {
+    const dKey = e.destKey || "?";
+    if (!dests.has(dKey)) {
+      dests.set(dKey, { key: dKey, label: e.destLabel || dKey, sub: e.destSub || "", months: new Map() });
+    }
+    const g = dests.get(dKey);
+    const mKey = e.monthKey || "unknown";
+    if (!g.months.has(mKey)) {
+      g.months.set(mKey, { key: mKey, label: e.monthLabel || mKey, days: new Map() });
+    }
+    const m = g.months.get(mKey);
+    const dayKey = savedDayKey(e.savedAt || 0);
+    if (!m.days.has(dayKey)) m.days.set(dayKey, []);
+    m.days.get(dayKey).push(e);
+  });
+  return dests;
+}
+
+function renderSaved() {
+  const list = $("savedList");
+  if (!list) return;
+  updateSavedBadge();
+
+  const all = _saved.slice().sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  const q = (_savedFilter || "").trim().toLowerCase();
+  const items = q ? all.filter((e) => savedSearchText(e).indexOf(q) !== -1) : all;
+
+  if (!all.length) {
+    list.innerHTML = `<div class="saved-empty">Nothing saved yet. Finish a search, then press
+      <strong>☆ Save this search</strong> above the results (or <strong>☆ Save this run</strong> on an
+      automation run) and the whole result set is parked here.</div>`;
+    return;
+  }
+  if (!items.length) {
+    list.innerHTML = `<div class="saved-empty">No saved search matches “${_esc(_savedFilter)}”.</div>`;
+    return;
+  }
+
+  const groups = savedGroups(items);
+  let html = "";
+  groups.forEach((g) => {
+    let n = 0;
+    g.months.forEach((m) => m.days.forEach((arr) => { n += arr.length; }));
+    const months = Array.from(g.months.values()).sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+    html += `<details class="saved-group" open>
+      <summary class="saved-group-head">
+        <span class="saved-group-title">${_esc(g.label)}</span>
+        <span class="saved-group-sub">${g.sub ? _esc(g.sub) + " · " : ""}${n} saved search${n === 1 ? "" : "es"}</span>
+      </summary>
+      <div class="saved-group-body">`;
+    months.forEach((m) => {
+      let mn = 0;
+      m.days.forEach((arr) => { mn += arr.length; });
+      html += `<div class="saved-month">
+        <div class="saved-month-head">${_esc(m.label)} <span class="saved-count">${mn}</span></div>`;
+      Array.from(m.days.keys()).sort().reverse().forEach((dk) => {
+        const arr = m.days.get(dk).slice().sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+        html += `<div class="saved-day">
+          <div class="saved-day-head">${_esc(savedDayLabel(arr[0].savedAt))} · searched on this day</div>
+          ${arr.map(savedItemHtml).join("")}
+        </div>`;
+      });
+      html += `</div>`;
+    });
+    html += `</div></details>`;
+  });
+  list.innerHTML = html;
+}
+
+/* ---------- the saved-search screen ---------- */
+function savedNote(e) {
+  return `Saved search — parked on ${new Date(e.savedAt || Date.now()).toLocaleString()} ` +
+    `(${savedSourceLabel(e)}). Showing the results exactly as they came back then: live prices move on, ` +
+    `so read them as a snapshot. ` + ((e.data && e.data.note) || "");
+}
+
+function showSavedScreen(id) {
+  const e = _saved.find((x) => x.id === id);
+  if (!e) { savedStatus("That saved search is no longer here."); return; }
+  _savedScreenId = e.id;
+
+  const rs = $("savedScreen");
+  if (!rs) {   // markup missing — fall back to the main results area
+    renderResults(e.data);
+    if ($("results")) $("results").style.display = "block";
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (err) { /* old browser */ }
+    return;
+  }
+  renderResults(Object.assign({}, e.data, { note: savedNote(e) }),
+    { root: rs, ids: SAVED_SCREEN_RESULT_IDS });
+
+  const s = e.summary || {};
+  const best = s.best;
+  if ($("savedScreenTitle")) {
+    $("savedScreenTitle").textContent = `★ ${e.destLabel || "Saved search"}${e.monthLabel ? " — " + e.monthLabel : ""}`;
+  }
+  if ($("savedScreenSub")) {
+    const bits = [
+      `${(e.params && e.params.origin) || "?"} → ${(e.params && e.params.destination) || "?"}`,
+      `searched ${new Date(e.savedAt || Date.now()).toLocaleString()}`,
+      savedSourceLabel(e),
+    ];
+    $("savedScreenSub").textContent = bits.filter(Boolean).join(" · ");
+  }
+  const price = $("savedScreenPrice");
+  if (price) {
+    price.innerHTML = best && best.price != null
+      ? `<span class="run-screen-price-num">${_esc(best.price)} ${_esc(s.currency || best.currency || "")}</span>` +
+        `<span class="run-screen-price-lbl">cheapest in this saved search${best.route ? " · " + _esc(best.route) : ""}</span>`
+      : `<span class="run-screen-price-lbl">no flights were found</span>`;
+  }
+  rs.style.display = "flex";
+  try { document.body.classList.add("run-screen-open"); } catch (err) { /* ignore */ }
+  try { if ($("savedScreenBack")) $("savedScreenBack").focus(); } catch (err) { /* ignore */ }
+  try { rs.scrollTop = 0; } catch (err) { /* ignore */ }
+  track("saved-search", { action: "open" });
+}
+
+function hideSavedScreen() {
+  const rs = $("savedScreen");
+  if (!rs) return;
+  rs.style.display = "none";
+  _savedScreenId = null;
+  try { document.body.classList.remove("run-screen-open"); } catch (e) { /* ignore */ }
+}
+
+/** Re-run the saved criteria exactly as they were: fill the form and search. */
+function rerunSaved(id) {
+  const e = _saved.find((x) => x.id === id);
+  if (!e) { savedStatus("That saved search is no longer here."); return; }
+  hideSavedScreen();
+  applyParamsToForm(e.params);
+  if (typeof _doSearchFromForm === "function") {
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (err) { /* old browser */ }
+    _doSearchFromForm();
+  } else {
+    savedStatus("The search form is not ready yet — press Search to run these criteria.");
+  }
+  track("saved-search", { action: "rerun" });
+}
+
+function openSavedCard() {
+  const c = $("savedCard");
+  try { if (c && !c.open) c.open = true; } catch (e) { /* ignore */ }
+  updateSavedBadge();
+  try { if (c && c.scrollIntoView) c.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* ignore */ }
+}
+
+/* ---------- export / import ---------- */
+function exportSaved() {
+  if (!_saved.length) { savedStatus("Nothing to export yet."); return; }
+  if (downloadJson(`flightschart-saved-searches-${isoLocal(new Date())}.json`,
+    { v: 1, exported: new Date().toISOString(), searches: _saved })) {
+    savedStatus(`Exported ${_saved.length} saved search(es).`);
+  }
+}
+
+function importSaved(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(String(reader.result));
+      const incoming = Array.isArray(parsed) ? parsed : (parsed && parsed.searches);
+      if (!Array.isArray(incoming)) throw new Error("no searches array found");
+      let n = 0;
+      incoming.forEach((e) => {
+        if (!e || typeof e !== "object" || !e.data) return;
+        const copy = JSON.parse(JSON.stringify(e));
+        copy.id = copy.id || newSavedId();
+        if (_saved.some((x) => x.id === copy.id)) copy.id = newSavedId();
+        if (!copy.params || typeof copy.params !== "object") copy.params = {};
+        if (!copy.savedAt) copy.savedAt = Date.now();
+        const g = savedDestInfo(copy.params, copy.data);
+        copy.destKey = copy.destKey || g.key;
+        copy.destLabel = copy.destLabel || g.label;
+        copy.destSub = copy.destSub == null ? g.sub : copy.destSub;
+        copy.monthKey = copy.monthKey || monthKey(copy.data.date_from);
+        copy.monthLabel = copy.monthLabel || monthLabel(copy.data.date_from);
+        copy.summary = copy.summary || summarizeRun(copy.data);
+        _saved.push(copy);
+        n++;
+      });
+      _saved.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+      if (_saved.length > SAVED_MAX) _saved.length = SAVED_MAX;
+      saveSaved();
+      renderSaved();
+      savedStatus(`Imported ${n} saved search(es).`);
+    } catch (e) {
+      savedStatus("Import failed: " + (e.message || e));
+    }
+  };
+  reader.onerror = () => savedStatus("Could not read that file.");
+  reader.readAsText(file);
+}
+
+/* ---------- wiring ---------- */
+function initSaved() {
+  if (!$("savedList")) return;
+  loadSaved();
+  renderSaved();
+
+  if ($("savedList")) $("savedList").addEventListener("click", (e) => {
+    const t = e.target;
+    if (!t || typeof t.closest !== "function") return;
+    const show = t.closest("[data-saved-show]");
+    if (show) { showSavedScreen(show.getAttribute("data-saved-show")); return; }
+    const again = t.closest("[data-saved-rerun]");
+    if (again) { rerunSaved(again.getAttribute("data-saved-rerun")); return; }
+    const del = t.closest("[data-saved-del]");
+    if (del) deleteSaved(del.getAttribute("data-saved-del"));
+  });
+
+  if ($("savedFilter")) $("savedFilter").addEventListener("input", () => {
+    _savedFilter = $("savedFilter").value || "";
+    renderSaved();
+  });
+  if ($("saveSearchBtn")) $("saveSearchBtn").addEventListener("click", saveCurrentResults);
+  if ($("runScreenSave")) $("runScreenSave").addEventListener("click", saveCurrentResults);
+  if ($("savedJumpBtn")) $("savedJumpBtn").addEventListener("click", openSavedCard);
+  if ($("savedScreenBack")) $("savedScreenBack").addEventListener("click", hideSavedScreen);
+  if ($("savedRerun")) $("savedRerun").addEventListener("click", () => { if (_savedScreenId) rerunSaved(_savedScreenId); });
+  if ($("savedDelete")) $("savedDelete").addEventListener("click", () => { if (_savedScreenId) deleteSaved(_savedScreenId); });
+  if ($("savedExport")) $("savedExport").addEventListener("click", exportSaved);
+  if ($("savedImport")) $("savedImport").addEventListener("click", () => { if ($("savedImportFile")) $("savedImportFile").click(); });
+  if ($("savedImportFile")) $("savedImportFile").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) importSaved(f);
+    e.target.value = "";
+  });
+  if ($("savedClear")) $("savedClear").addEventListener("click", clearSaved);
+
+  document.addEventListener("keydown", (e) => {
+    const rs = $("savedScreen");
+    if (!rs || rs.style.display === "none") return;
+    if (e.key !== "Escape" && e.key !== "Backspace") return;
+    // Backspace is only a shortcut when the user is not typing in a field.
+    const t = e.target;
+    const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+    if (e.key === "Backspace" && typing) return;
+    e.preventDefault();
+    hideSavedScreen();
+  });
+
+  updateSaveButton();
+}
+
 /* ------------------------------------------------------------------ *
  *  Form input rules
  *  - The city/country fields are CAPITALS-ONLY: whatever is typed (or
@@ -3666,6 +4253,9 @@ function wire() {
     $("results").style.display = "none";
     $("resumeBox").style.display = "none";
     hideRunScreen();
+    // A new search means the previous result set is no longer what is on screen.
+    _lastResults = null;
+    updateSaveButton();
     $("progress").style.display = "block";
     $("progress").textContent = "Contacting the reader…";
     const btn = $("submitBtn");
@@ -3735,6 +4325,10 @@ function wire() {
       const data = await searchPromise;
       renderResults(data);
       $("results").style.display = "block";
+      // The whole result set, plus the criteria that produced it, can be parked
+      // in Saved searches from here.
+      _lastResults = { data, params, at: Date.now(), source: "search", sourceLabel: "manual search" };
+      updateSaveButton();
       notifyDone(data);
 
       const lookups = data.searches_performed || 0;
@@ -3779,6 +4373,10 @@ function wire() {
     e.preventDefault();
     doSearch();
   });
+
+  // Saved searches re-run their criteria through the very same form path, so a
+  // saved search and a hand-made one behave identically from here on.
+  _doSearchFromForm = doSearch;
 
   // Analytics: which comparison partner people actually leave for. Delegated so
   // it also covers links rendered later (results, archived runs, comparisons).
@@ -3849,6 +4447,7 @@ function wire() {
   });
 
   initAutomations();
+  initSaved();
 
   (async () => {
     try { await loadAirports(); } catch (e) {}

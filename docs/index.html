@@ -46,7 +46,7 @@
         </svg>
         <span>Cheap Flights Finder</span>
       </h1>
-      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run</p>
+      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run · Saved searches park any result set, grouped by destination, departure month and search date</p>
       <div class="status-row">
         <span class="pill" id="dataPill"><span class="dot"></span><span id="dataPillText">data: live Google Flights</span></span>
         <span class="pill" id="airportPill"><span class="dot"></span><span id="airportPillText">airports: loading…</span></span>
@@ -312,6 +312,42 @@
       </details>
     </div>
 
+    <div class="card">
+      <details class="settings" id="savedCard">
+        <summary>★ Saved searches (favorites) <span class="saved-badge" id="savedBadge">none</span></summary>
+        <div class="settings-body">
+          <p class="hint">
+            <strong>Park any search here.</strong> When a search finishes, press <strong>☆ Save this search</strong>
+            just above the results (or <strong>☆ Save this run</strong> on an automation run) and the whole result set
+            is kept — every flight, price and the exact criteria that produced it. Saved searches are grouped by
+            <strong>destination</strong> (country / city), then <strong>departure month</strong>, then the
+            <strong>date you made the search</strong>, so the same route searched on different days stays easy to
+            tell apart.
+          </p>
+          <p class="hint">
+            Open one to <strong>show its results</strong> exactly as they came back (prices are live and will have
+            moved on since — treat them as a snapshot), or press <strong>Search again</strong> to re-run the
+            identical criteria right now. Everything lives in this browser only, so <strong>export</strong> before
+            clearing site data.
+          </p>
+
+          <div class="saved-filter-row">
+            <input id="savedFilter" placeholder="Filter saved searches (destination, month, date…)" autocomplete="off" spellcheck="false" />
+          </div>
+
+          <div id="savedList" class="saved-list"></div>
+
+          <div class="settings-inline">
+            <button type="button" class="btn-mini ghost" id="savedExport">Export all (JSON)</button>
+            <button type="button" class="btn-mini ghost" id="savedImport">Import JSON</button>
+            <input type="file" id="savedImportFile" accept="application/json,.json" style="display:none" />
+            <button type="button" class="btn-mini ghost" id="savedClear">Delete all</button>
+            <span class="hint" id="savedStatus"></span>
+          </div>
+        </div>
+      </details>
+    </div>
+
     <div id="resumeBox" class="resume-box" style="display:none">
       <span id="resumeText"></span>
       <button type="button" class="btn-mini" id="resumeBtn">Resume search</button>
@@ -321,6 +357,11 @@
     <div id="errorBox" class="error" style="display:none"></div>
 
     <div id="results">
+      <div class="results-toolbar" id="resultsToolbar">
+        <button type="button" class="btn-mini" id="saveSearchBtn" style="display:none">☆ Save this search to Saved searches</button>
+        <button type="button" class="btn-mini ghost" id="savedJumpBtn">View saved searches</button>
+        <span class="hint" id="saveSearchHint"></span>
+      </div>
       <div class="result-header" id="resultMeta"></div>
       <div id="flightResults"></div>
       <p class="note" id="resultNote"></p>
@@ -343,6 +384,7 @@
         <div class="run-screen-title" id="runScreenTitle"></div>
         <div class="run-screen-sub" id="runScreenSub"></div>
       </div>
+      <button type="button" class="btn-mini" id="runScreenSave" style="display:none">☆ Save this run</button>
       <div class="run-screen-price" id="runScreenPrice"></div>
     </div>
     <div class="run-screen-progress" id="runScreenProgress" style="display:none"></div>
@@ -350,6 +392,28 @@
       <div class="result-header" id="runScreenMeta"></div>
       <div id="runScreenResults"></div>
       <p class="note" id="runScreenNote"></p>
+    </div>
+  </div>
+
+  <!-- The saved-search screen: one parked result set, on its own page, with a
+       back button and the option to re-run the same criteria right now. -->
+  <div class="run-screen" id="savedScreen" style="display:none" role="dialog" aria-modal="true" aria-labelledby="savedScreenTitle">
+    <div class="run-screen-bar">
+      <button type="button" class="btn-mini" id="savedScreenBack">← Back to main screen</button>
+      <div class="run-screen-head">
+        <div class="run-screen-title" id="savedScreenTitle"></div>
+        <div class="run-screen-sub" id="savedScreenSub"></div>
+      </div>
+      <div class="run-screen-actions">
+        <button type="button" class="btn-mini" id="savedRerun">Search again (same criteria)</button>
+        <button type="button" class="btn-mini ghost" id="savedDelete">Delete</button>
+      </div>
+      <div class="run-screen-price" id="savedScreenPrice"></div>
+    </div>
+    <div class="run-screen-body">
+      <div class="result-header" id="savedScreenMeta"></div>
+      <div id="savedScreenResults"></div>
+      <p class="note" id="savedScreenNote"></p>
     </div>
   </div>
 

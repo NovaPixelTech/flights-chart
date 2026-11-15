@@ -15,6 +15,9 @@ weekday, times, airline) plus the number of stay days. The results also carry a 
 **cross-checks the cheapest options on Google Flights (where Gotogate is listed), Kiwi.com and
 Skyscanner**. Any search can also be turned into an **automation** that re-runs itself on your own
 schedule, notifies you when each run's results list is ready, and keeps an archive of every run.
+Any result set — a manual search or an archived automation run — can be **parked as a saved
+search**, kept in its own section and grouped by destination, departure month and the date it was
+searched.
 
 By default a search is **exhaustive**: every resolved airport pair, every stay length and **every
 departure date that fits the window** is queried, so the cheapest option reported really is the
@@ -105,6 +108,12 @@ Everything runs in `docs/app.js`. It is a self-contained JavaScript port of the
   exportable). Because the page is 100% static, runs happen **while the tab/installed app is open**
   — an interrupted run continues from its saved progress when you reopen, and a slot missed while it
   was closed is replayed **once**, not N times. See [Automations](#automations).
+- **Saved searches (favorites)** — the **Saved searches** card parks whole result sets: press
+  **☆ Save this search** above the results (or **☆ Save this run** on an archived automation run)
+  and the flights, prices and the criteria that produced them are kept in `localStorage`. They are
+  grouped **destination → departure month → search date**, and each one can be opened to **show its
+  results** exactly as they came back or **re-run the identical criteria** in one click. See
+  [Saved searches (favorites)](#saved-searches-favorites).
 
 > **No secret is embedded and nothing is exposed.** The reader request and the (already
 > public) Google Flights page are the only network calls.
@@ -260,6 +269,52 @@ backend or a CI cron, which this project deliberately avoids.)
 Archives live in your browser's `localStorage`. If it fills up, the oldest archived runs are pruned
 automatically, so **export first** if you want to keep them.
 
+## Saved searches (favorites)
+
+A **saved search** is a whole result set parked exactly as it came back — every flight, price and
+the criteria that produced it — so you can look at it again later, or re-run it with the identical
+parameters. It is the "I want to keep this one" side of a search, next to the Automations "run it
+again on a schedule" side.
+
+**Parking a search.** Finish a search (or open an archived automation run) and press the save
+button above the results:
+
+- **☆ Save this search to Saved searches** — on the main results toolbar, for a manual search.
+- **☆ Save this run** — on an archived automation run's own screen.
+
+The whole result set is copied into the **Saved searches** card below the form, along with the
+exact criteria. The button then reads **★ Saved to Saved searches** and is disabled, so the same
+on-screen result set cannot be parked twice; the next search clears it.
+
+**How they are grouped.** Saved searches are filed the way you would look for them:
+
+1. **Destination country / city** — a single resolved city if the search named one, otherwise the
+   single resolved country (e.g. *Greece*), otherwise the raw input. The group's subtitle lists the
+   airport codes actually searched and the country.
+2. **Departure month** — the month the outbound date window starts in (e.g. *December 2026*).
+3. **Search date** — the day you made the search (e.g. *Sun 15.11.2026*).
+
+So the same route searched on different days, or aimed at different months, stays easy to tell
+apart. Destination groups collapse and expand, everything is newest-first, and a **filter box**
+narrows the list by destination, month, search date, source or criteria text.
+
+**Opening one.** Every saved search offers:
+
+- **Show results** — opens it on its own full-screen page, rendering the stored list exactly as it
+  came back, with a **← Back to main screen** button. Prices are a snapshot: live prices move on.
+- **Search again (same criteria)** — restores the exact criteria into the form and starts a **new**
+  search right away, so a saved search and a hand-made one behave identically from there on.
+- **Delete** — removes just that saved search (asks first).
+
+**Managing them.** **Export all (JSON)** downloads every saved search as a JSON file, **Import
+JSON** merges a file back in (duplicate ids are re-keyed so nothing is overwritten), and **Delete
+all** empties the list (with a confirmation). The header badge shows how many are saved.
+
+Saved searches live in your browser's `localStorage` (this browser only, no account, nothing sent
+anywhere). At most **40** are kept — the newest — and if storage fills up the **oldest saved
+searches are pruned automatically**, so **export first** if you want to keep them. The user-facing
+storage and analytics note lives in `docs/privacy.html`.
+
 ## Install it on your phone's home screen
 
 The app ships home-screen icons, so "Add to Home Screen" gives you a real app tile with the brand
@@ -319,10 +374,10 @@ one website and 6 months of retention.
 3. Deploy. No backend, account system or build step is involved.
 
 Tracked: page views, visitors, countries, referrers and devices, plus the events
-`search-started`, `search-completed`, `search-error` (category only) and `outbound-click`
-(Google Flights / Kiwi / Skyscanner / Gotogate). Origin, destination, dates and prices are
-never sent. Leave the ID blank to disable analytics entirely. The user-facing note lives in
-`docs/privacy.html`.
+`search-started`, `search-completed`, `search-error` (category only), `outbound-click`
+(Google Flights / Kiwi / Skyscanner / Gotogate) and `saved-search` (action only: `save`, `open`,
+`rerun` or `delete`). Origin, destination, dates and prices are never sent. Leave the ID blank to
+disable analytics entirely. The user-facing note lives in `docs/privacy.html`.
 
 ## Local development
 
@@ -394,6 +449,12 @@ python -m http.server 8000 --directory docs
   Automations run **one at a time** on the shared reader quota (a manual search stops a running
   automation first). Each automation's archive (last 24 runs) is stored in `localStorage` —
   **export it** before clearing site data.
+- **Saved searches are a snapshot, in this browser only.** A saved search keeps the results exactly
+  as they came back (live prices will have moved on since) plus the criteria, in `localStorage` —
+  no account, nothing sent anywhere. At most **40** are kept and the **oldest are pruned
+  automatically** when storage fills up, so **export first** if you want to keep them. **Search
+  again (same criteria)** re-runs the stored criteria as a fresh search; only **Show results**
+  replays the old list.
 - Prices are live estimates only — not bookable through this app. Booking-site comparisons
   (Google Flights, Kiwi.com, Skyscanner, Gotogate) are **outbound links only** — see
   [Cross-check on other sites](#cross-check-on-other-sites-google-flights-kiwicom-skyscanner-gotogate);
@@ -413,11 +474,13 @@ but it is **no longer required**: the GitHub Pages app above is fully self-conta
 
 The static app (`docs/`) gained a **Round-trip vs. two separate one-ways** comparison and a
 **departure-weekday filter**, but `app.py` + `templates/index.html` were intentionally left
-untouched (it is the legacy path). If you ever want the Flask backend to match, here is exactly
-what to change — the static app is the reference implementation, so mirror it rather than
-inventing a new design. (For the weekday filter specifically: accept a `depart_days` array of
-`0`–`6` weekday indices in `api_search()`, and when building the sampled outbound dates, skip any
-date whose `date.weekday()` is not in that set — mirroring `runSearch()` in `docs/app.js`.)
+untouched (it is the legacy path). **Saved searches** are likewise a static-app feature only: they
+need no backend at all (they are `localStorage` in `docs/app.js`), so the legacy
+`templates/index.html` does not have them. If you ever want the Flask backend to match the other
+two, here is exactly what to change — the static app is the reference implementation, so mirror it
+rather than inventing a new design. (For the weekday filter specifically: accept a `depart_days`
+array of `0`–`6` weekday indices in `api_search()`, and when building the sampled outbound dates,
+skip any date whose `date.weekday()` is not in that set — mirroring `runSearch()` in `docs/app.js`.)
 
 **Concept.** A *round-trip ticket* is a single booking priced from Google's round-trip response.
 *Two separate one-ways* is the sum of the cheapest one-way in each direction (often two different
