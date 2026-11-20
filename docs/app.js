@@ -978,7 +978,7 @@ async function searchOneRoute(task, currency, opts) {
 }
 
 /** Open-jaw: cheapest outbound one-way + cheapest return one-way, summed. */
-async function searchOpenJaw(task, currency) {
+async function searchOpenJaw(task, currency, cap) {
   const maxStops = task.maxStops != null ? task.maxStops : 1;
   const outTfs = buildTfs({
     legs: [{ date: task.outbound, from: task.o_out, to: task.dest, maxStops, maxLayover: 180 }],
@@ -988,15 +988,15 @@ async function searchOpenJaw(task, currency) {
     legs: [{ date: task.ret, from: task.dest, to: task.o_ret, maxStops, maxLayover: 180 }],
     trip: "one-way", currency,
   });
-  const [outHtml, retHtml] = await _withRetry(() =>
-    Promise.all([fetchGoogleFlightsHtml(outTfs, currency), fetchGoogleFlightsHtml(retTfs, currency)])
-  );
-  const outP = parseFlightsFromHtml(outHtml);
-  const retP = parseFlightsFromHtml(retHtml);
-
   const usable = (d) => !(maxStops === 0 && d.stops > 0) &&
     !(d.stops > 0 && d.layovers_min.some((l) => l > 180)) && d.price != null;
 
+  // Fetch the outbound first. When a price cap is set and even the cheapest
+  // outbound already exceeds it, the return direction cannot bring the total
+  // back under the cap (fares are non-negative), so that reader request is
+  // skipped altogether.
+  const outHtml = await _withRetry(() => fetchGoogleFlightsHtml(outTfs, currency));
+  const outP = parseFlightsFromHtml(outHtml);
   const bestOut = outP.options
     .map((o) => toFlightDict(o, {
       origin: task.o_out, dest: task.dest, returnAirport: task.o_out,
@@ -1004,6 +1004,10 @@ async function searchOpenJaw(task, currency) {
     }, outP.airlineNames))
     .filter(usable)
     .sort((a, b) => a.price - b.price)[0];
+  if (cap != null && (!bestOut || Number(bestOut.price) > cap)) return [];
+
+  const retHtml = await _withRetry(() => fetchGoogleFlightsHtml(retTfs, currency));
+  const retP = parseFlightsFromHtml(retHtml);
   const bestRet = retP.options
     .map((o) => toFlightDict(o, {
       origin: task.dest, dest: task.o_ret, returnAirport: task.dest,
@@ -1013,9 +1017,11 @@ async function searchOpenJaw(task, currency) {
     .sort((a, b) => a.price - b.price)[0];
 
   if (!bestOut || !bestRet) return [];
+  const total = bestOut.price + bestRet.price;
+  if (cap != null && total > cap) return [];
 
   return [{
-    price: bestOut.price + bestRet.price,
+    price: total,
     airlines: Array.from(new Set([...(bestOut.airlines || []), ...(bestRet.airlines || [])])),
     stops: bestOut.stops,
     return_stops: bestRet.stops,
@@ -1043,20 +1049,23 @@ async function searchOpenJaw(task, currency) {
  * dates — it is frequently cheaper, which is exactly the confusion this mode
  * exists to make visible.
  */
-async function searchOneWayCombo(task, currency) {
+async function searchOneWayCombo(task, currency, cap) {
   const maxStops = task.maxStops != null ? task.maxStops : 2;
-  const [outOptions, retOptions] = await Promise.all([
-    fetchOneWayOptions(task.origin, task.dest, task.outbound, maxStops, currency),
-    fetchOneWayOptions(task.dest, task.origin, task.ret, maxStops, currency),
-  ]);
   const usable = (d) => d.price != null &&
     !(maxStops === 0 && d.stops > 0) &&
     !(d.stops > 0 && d.layovers_min.some((l) => l > 180));
+  // Fetch out first: if its cheapest fare alone busts the user's cap, the
+  // second (return) reader request is pointless and is not sent at all.
+  const outOptions = await fetchOneWayOptions(task.origin, task.dest, task.outbound, maxStops, currency);
   const bestOut = outOptions.filter(usable).sort((a, b) => a.price - b.price)[0];
+  if (cap != null && (!bestOut || Number(bestOut.price) > cap)) return [];
+  const retOptions = await fetchOneWayOptions(task.dest, task.origin, task.ret, maxStops, currency);
   const bestRet = retOptions.filter(usable).sort((a, b) => a.price - b.price)[0];
   if (!bestOut || !bestRet) return [];
+  const total = bestOut.price + bestRet.price;
+  if (cap != null && total > cap) return [];
   return [{
-    price: bestOut.price + bestRet.price,
+    price: total,
     airlines: Array.from(new Set([...(bestOut.airlines || []), ...(bestRet.airlines || [])])),
     stops: bestOut.stops,
     legs: bestOut.legs,
@@ -1173,6 +1182,13 @@ async function runSearch(params, onProgress, opts) {
   const stayDateSlots = stayPlan.reduce((n, p) => n + p.dates.length, 0);
 
   const currency = params.currency || "USD";
+  // Optional ceiling on what the user will pay, in `currency`. It is applied to
+  // the tickets AFTER their prices are fetched (see `visible` below): the
+  // lookup grid cannot skip a slot just because a cap was asked for — the price
+  // of a slot is only known once it has been looked up. It does, however, cut
+  // the number of return-direction lookups, which are spent only on tickets we
+  // actually display.
+  const maxPrice = ticketPriceCap(params);
 
   // Which booking style(s) to price. "roundtrip" = Google's single round-trip
   // fare; "oneway" = cheapest one-way out + cheapest one-way back (two tickets);
@@ -1284,6 +1300,8 @@ async function runSearch(params, onProgress, opts) {
   };
   // A separate-one-way lookup makes two reader requests (one per direction), a
   // round-trip lookup one; used for the ETA. Open-jaw is also two directions.
+  // With a price cap some second directions are skipped, so this is an upper
+  // bound and the ETA errs on the safe side.
   const taskFetches = (t) => (t.kind === "rt" ? 1 : 2);
 
   // ---- resume support: a long exhaustive sweep may outlive the tab ----
@@ -1414,8 +1432,11 @@ async function runSearch(params, onProgress, opts) {
 
   function record(f) {
     all.push(f);
+    // Per-airport summaries only show tickets the user would actually accept.
+    // `all` itself stays unfiltered until the deep sweep has ranked routes, so
+    // coverage of the calendar is not changed by the price cap.
     const bucket = perOrigin[f.origin_airport];
-    if (bucket) {
+    if (bucket && withinPriceCap(f, maxPrice)) {
       const isDirect = _isDirectOption(f);
       const upd = (cur) => (cur == null || (f.price != null && (cur.price == null || f.price < cur.price)) ? f : cur);
       bucket.any = upd(bucket.any);
@@ -1480,9 +1501,9 @@ async function runSearch(params, onProgress, opts) {
         const task = queue.shift();
         try {
           const found = task.kind === "oj"
-            ? await searchOpenJaw(task, currency)
+            ? await searchOpenJaw(task, currency, maxPrice)
             : task.kind === "ow"
-              ? await searchOneWayCombo(task, currency)
+              ? await searchOneWayCombo(task, currency, maxPrice)
               : await searchOneRoute(task, currency, { withReturn: false });
           for (const f of found) record(f);
           finishedKeys.add(taskId(task));
@@ -1606,13 +1627,18 @@ async function runSearch(params, onProgress, opts) {
   }
 
   all.sort((a, b) => (a.price ?? 1e9) - (b.price ?? 1e9));
-  const directs = all.filter((r) => _isDirectOption(r));
-  const connecting = all.filter((r) => !_isDirectOption(r));
+  // Apply the price cap here, once every lookup is in. Everything from this
+  // point on — headline picks, ranked list, per-date/per-airport tables, return
+  // fetches and summaries — sees only tickets at or under the user's limit.
+  const visible = maxPrice == null ? all : all.filter((f) => withinPriceCap(f, maxPrice));
+  const hiddenByCap = all.length - visible.length;
+  const directs = visible.filter((r) => _isDirectOption(r));
+  const connecting = visible.filter((r) => !_isDirectOption(r));
   // Split by booking style so each can be reported in its own section. Open-jaw
   // is also two separate tickets (different airports), so it rides with the
   // separate-one-way group and is labelled as such per row.
-  const roundTripOpts = all.filter((r) => !r.open_jaw && r.ticket_type !== "oneway");
-  const oneWayOpts = all.filter((r) => r.open_jaw || r.ticket_type === "oneway");
+  const roundTripOpts = visible.filter((r) => !r.open_jaw && r.ticket_type !== "oneway");
+  const oneWayOpts = visible.filter((r) => r.open_jaw || r.ticket_type === "oneway");
   const cheapestRoundTrip = roundTripOpts[0] || null;
   const cheapestRoundTripDirect = roundTripOpts.find((r) => _isDirectOption(r)) || null;
   const cheapestOneWay = oneWayOpts[0] || null;
@@ -1620,7 +1646,7 @@ async function runSearch(params, onProgress, opts) {
 
   // cheapest option found for each outbound date we actually queried
   const perDate = {};
-  for (const f of all) {
+  for (const f of visible) {
     const k = f.outbound_date;
     if (!k) continue;
     if (!perDate[k] || (f.price != null && (perDate[k].price == null || f.price < perDate[k].price))) {
@@ -1651,10 +1677,10 @@ async function runSearch(params, onProgress, opts) {
   const addDisplay = (f) => { if (f && !seenFlights.has(f)) { seenFlights.add(f); displaySet.push(f); } };
   addDisplay(directs[0]);
   addDisplay(connecting[0]);
-  all.slice(0, 12).forEach(addDisplay);        // the ranked list people actually read
+  visible.slice(0, 12).forEach(addDisplay);    // the ranked list people actually read
   perOriginList.forEach((r) => addDisplay(r.cheapest_any));
   perDateList.forEach((r) => addDisplay(r.cheapest));
-  all.slice(12, 50).forEach(addDisplay);
+  visible.slice(12, 50).forEach(addDisplay);
   const returnPlan = await attachReturnsToDisplay(displaySet, currency, (p) => {
     currentPhase = "returns";
     if (onProgress) onProgress({ phase: "returns", done: p.done, total: p.total, found: all.length, errors });
@@ -1773,10 +1799,13 @@ async function runSearch(params, onProgress, opts) {
     cheapest_oneway_direct: cheapestOneWayDirect,
     has_roundtrip_results: roundTripOpts.length > 0,
     has_oneway_results: oneWayOpts.length > 0,
-    ranked_options: all.slice(0, 50),
+    ranked_options: visible.slice(0, 50),
     per_date_summary: perDateList,
     per_origin_summary: perOriginList,
-    all_results_count: all.length,
+    all_results_count: visible.length,
+    found_before_cap: all.length,
+    max_price: maxPrice,
+    hidden_by_cap: hiddenByCap,
     note:
       "Live Google Flights prices, fetched and parsed entirely in your browser — no backend, no API key. " +
       "All of Google's itinerary lists (nonstop and connecting) are parsed, so the cheapest option is included. " +
@@ -1791,7 +1820,7 @@ async function runSearch(params, onProgress, opts) {
         ? "This search was EXHAUSTIVE: every airport pair, every stay length and every " +
           (dayFilter ? `${departDaysLongLabel(departDays)} ` : "") +
           `departure date that fits the window was looked up (${fullGrid} lookups), so the cheapest option listed ` +
-          "really is the cheapest on offer. "
+          `really is the cheapest on offer${maxPrice != null ? " at or under your price cap" : ""}. `
         : stopped
           ? "This run was stopped early, so the grid was only partly swept — the results below are what had been " +
             "found by then; run it again (or resume) to complete the coverage. "
@@ -1815,6 +1844,12 @@ async function runSearch(params, onProgress, opts) {
       (dayFilter
         ? `Only outbound departures on ${departDaysLongLabel(departDays)} were searched, so departure dates ` +
           "on other weekdays were neither looked up nor listed. "
+        : "") +
+      (maxPrice != null
+        ? `Only tickets at or under ${maxPrice} ${currency} are listed; ${hiddenByCap} more expensive ` +
+          `${hiddenByCap === 1 ? "option was" : "options were"} hidden. The cap is applied after prices are ` +
+          "fetched — every route/date still had to be looked up to learn its price, so it does not shorten the " +
+          "sweep (it does avoid return-detail lookups for tickets nobody would see). "
         : "") +
       "Open-jaw totals are estimated from two separate one-ways.",
   };
@@ -2097,9 +2132,10 @@ function renderResults(data, where) {
     ${data.ticket_type ? `<span>Ticket: <strong>${data.ticket_type === "both" ? "round-trip + two separate one-ways" : data.ticket_type === "oneway" ? "two separate one-ways" : "round-trip"}</strong></span>` : ""}
     ${data.depart_days_label ? `<span>Departure day: <strong>${_esc(data.depart_days_label)}</strong> only</span>` : ""}
     ${data.direct_only ? `<span>Direct (nonstop) only</span>` : ""}
+    ${data.max_price != null ? `<span class="price-cap">Max price <strong>${_esc(String(data.max_price))} ${_esc(data.currency || "")}</strong> · ${data.hidden_by_cap || 0} over-cap option${(data.hidden_by_cap || 0) === 1 ? "" : "s"} hidden</span>` : ""}
     <span>${data.searches_performed || 0} lookups · ${data.all_results_count || 0} options found${data.stopped_early ? (data.stopped_by_user ? " · partial (stopped by you)" : " · partial (time limit)") : ""}</span>
     ${data.exhaustive && !data.safety_capped && !data.stopped_early
-      ? `<span class="coverage-complete">Exhaustive: every airport pair × every stay length × <strong>every ${data.depart_days_label ? _esc(data.depart_days_label) + " " : ""}departure date that fits the window</strong> (${data.grid_total} lookups) — the cheapest option listed is the cheapest on offer</span>`
+      ? `<span class="coverage-complete">Exhaustive: every airport pair × every stay length × <strong>every ${data.depart_days_label ? _esc(data.depart_days_label) + " " : ""}departure date that fits the window</strong> (${data.grid_total} lookups) — the cheapest option listed is the cheapest on offer${data.max_price != null ? " at or under your price cap" : ""}</span>`
       : ""}
     ${data.pairs_available ? `<span>Coverage: <strong>${data.pairs_searched}/${data.pairs_available}</strong> airport pairs · <strong>${data.dates_checked}/${data.dates_sweepable != null ? data.dates_sweepable : data.dates_in_window}</strong> departure dates · <strong>${data.stays_checked}/${data.stays_requested}</strong> stay lengths${data.safety_capped ? ` · grid is ${data.grid_total} lookups, capped at ${data.lookup_ceiling} (raise ⚙️ Lookup ceiling)` : ""}</span>` : ""}
     ${data.window_note ? `<span class="window-note">${data.window_note}</span>` : ""}
@@ -2167,7 +2203,10 @@ function renderResults(data, where) {
     });
     html += `</tbody></table></div>`;
   } else {
-    html += `<div class="flight-card"><div class="empty">No flights found in the sampled dates/airports. Try a different route, wider window, or fewer constraints.</div></div>`;
+    html += `<div class="flight-card"><div class="empty">${data.max_price != null
+      ? `No tickets at or under ${_esc(String(data.max_price))} ${_esc(cur)} were found. Raise the maximum price, ` +
+        "widen the window, or loosen the other criteria."
+      : "No flights found in the sampled dates/airports. Try a different route, wider window, or fewer constraints."}</div></div>`;
   }
 
   const dateRows = data.per_date_summary || [];
@@ -2522,6 +2561,32 @@ function setDepartDays(days) {
   syncDayChips();
 }
 
+/* ---------- maximum ticket price ---------- */
+/**
+ * The price cap as a positive number, or null when there is no cap. Blank, 0
+ * and nonsense all mean "no limit" so an empty form behaves as before.
+ * The cap is always in the currency the search was run with.
+ */
+function ticketPriceCap(params) {
+  const raw = params && params.max_price;
+  if (raw == null || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Does a found ticket fit under the cap? Tickets with no price are excluded. */
+function withinPriceCap(f, cap) {
+  if (cap == null) return true;
+  if (!f || f.price == null) return false;
+  const price = Number(f.price);
+  return Number.isFinite(price) && price <= cap;
+}
+
+/** "250 EUR" for a cap, "" for none. */
+function maxPriceLabel(cap, currency) {
+  return cap == null ? "" : `${cap} ${currency || ""}`.trim();
+}
+
 /** Fill the form from a stored params object (used when resuming a search). */
 function applyParamsToForm(p) {
   const set = (id, v) => { if ($(id) != null && v != null) $(id).value = v; };
@@ -2534,6 +2599,7 @@ function applyParamsToForm(p) {
   set("date_mode", p.date_mode);
   set("window_mode", p.window_mode || "trip");
   set("currency", p.currency);
+  set("max_price", ticketPriceCap(p) || "");
   set("open_jaw", p.open_jaw ? "true" : "false");
   set("ticket_type", p.ticket_type);
   setDepartDays(p.depart_days);
@@ -2555,6 +2621,10 @@ function readFormParams() {
     date_mode: $("date_mode") ? $("date_mode").value : "sampled",
     window_mode: $("window_mode") ? $("window_mode").value : "trip",
     currency: $("currency").value,
+    max_price: (() => {
+      const raw = $("max_price") ? String($("max_price").value).trim() : "";
+      return raw === "" ? null : ticketPriceCap({ max_price: raw });
+    })(),
     open_jaw: $("open_jaw").value === "true",
     ticket_type: $("ticket_type") ? $("ticket_type").value : "roundtrip",
     direct_only: $("direct_only") ? $("direct_only").checked : false,
@@ -2757,6 +2827,8 @@ function autoCriteriaText(p) {
     _esc(ticket),
     _esc(p.currency || ""),
   ];
+  const cap = ticketPriceCap(p);
+  if (cap != null) bits.push(`max ${cap} ${_esc(p.currency || "")}`.trim());
   if (p.direct_only) bits.push("direct only");
   if (p.open_jaw) bits.push("open-jaw allowed");
   const ddLabel = departDaysLabel(p.depart_days);
@@ -3634,8 +3706,10 @@ function savedDestInfo(params, data) {
 /** Plain-text description of the criteria (for the filter box). */
 function savedCriteriaText(p) {
   p = p || {};
+  const cap = ticketPriceCap(p);
   const bits = [
     p.origin, p.destination, p.date_from, p.date_to, p.currency,
+    cap == null ? "" : `max ${cap} ${p.currency || ""}`,
     p.ticket_type, p.window_mode === "depart" ? "departure date only" : "whole trip",
     p.date_mode === "every" ? "exhaustive" : "sampled",
     departDaysLongLabel(p.depart_days),

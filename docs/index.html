@@ -46,7 +46,7 @@
         </svg>
         <span>Cheap Flights Finder</span>
       </h1>
-      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run · Saved searches park any result set, grouped by destination, departure month and search date</p>
+      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Max-price filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run · Saved searches park any result set, grouped by destination, departure month and search date</p>
       <div class="status-row">
         <span class="pill" id="dataPill"><span class="dot"></span><span id="dataPillText">data: live Google Flights</span></span>
         <span class="pill" id="airportPill"><span class="dot"></span><span id="airportPillText">airports: loading…</span></span>
@@ -133,11 +133,23 @@
             </select>
           </div>
           <div>
+            <label for="max_price">Max ticket price (optional)</label>
+            <input id="max_price" name="max_price" type="number" min="0" step="any" inputmode="decimal"
+                   placeholder="any" />
+          </div>
+          <div>
             <label for="open_jaw">Allow open-jaw (diff. return airport)</label>
             <select id="open_jaw" name="open_jaw">
               <option value="true">Yes</option>
               <option value="false">No (same airport return)</option>
             </select>
+          </div>
+          <div class="full">
+            <div class="resolve-hint"><strong>Maximum ticket price.</strong> Leave blank (or 0) for no limit;
+              otherwise enter the most you are willing to pay <strong>in the selected currency</strong> — e.g.
+              <code>250</code> with EUR lists tickets costing 250 EUR or less. The cap applies to a round-trip's
+              total and to the sum of a two-one-way combo, in every results section and in automations/saved
+              searches. It filters results after prices are fetched, so it does <em>not</em> shorten the sweep.</div>
           </div>
           <div class="full">
             <label for="ticket_type">Ticket type</label>

@@ -9,7 +9,8 @@ are never conflated.
 Supports country inputs (expands to **every** commercial airport in that country — all of them
 are searched), explicit airport lists (`DUS, FRA, HAM`), flexible date windows, stay-length
 ranges, open-jaw (different return airport), a **departure-weekday filter** (e.g. only depart on
-Mondays), and an optional **direct-only (nonstop)** filter.
+Mondays), an optional **direct-only (nonstop)** filter, and an optional **maximum ticket price**
+(the most you will pay, in the selected currency).
 Every result lists the **outbound and the return** flight (airport, `dd.mm.yyyy` date with the
 weekday, times, airline) plus the number of stay days. The results also carry a small card that
 **cross-checks the cheapest options on Google Flights (where Gotogate is listed), Kiwi.com and
@@ -21,11 +22,12 @@ searched.
 
 By default a search is **exhaustive**: every resolved airport pair, every stay length and **every
 departure date that fits the window** is queried, so the cheapest option reported really is the
-cheapest on offer — no sampling that could step over the cheap Sunday. That takes a while on the
-free reader, so a run is meant to happen **in the background**: keep using your machine, the tab
-icon spins and the tab title shows the progress, and a **browser notification** tells you when the
-results are ready. Stopping early needs a deliberate **two-click confirmation**, and an interrupted
-run can be **resumed** after a reload; a free reader API key removes the wait.
+cheapest on offer (or the cheapest at or under your maximum price, when one is set) — no sampling
+that could step over the cheap Sunday. That takes a while on the free reader, so a run is meant to
+happen **in the background**: keep using your machine, the tab icon spins and the tab title shows
+the progress, and a **browser notification** tells you when the results are ready. Stopping early
+needs a deliberate **two-click confirmation**, and an interrupted run can be **resumed** after a
+reload; a free reader API key removes the wait.
 
 **Live flight prices. Completely static. No backend, no accounts, no API keys, no credit card.**
 It runs entirely in the browser on GitHub Pages.
@@ -174,6 +176,37 @@ window and stay length, the app says so and suggests another weekday, a wider wi
 stay, or *Departure date only*. The result header and the plain-language note both state which
 weekdays were searched.
 
+## Maximum ticket price
+
+**Max ticket price (optional)** is the most you are willing to pay, entered as a number **in the
+selected currency** (e.g. `250` with EUR selected). Leave it blank or set it to `0` for no limit.
+It is one more criterion alongside the route, dates, stay length, direct-only and ticket type —
+every one of them still applies, and a flight is listed only if it satisfies **all** of them
+*and* costs **at or under** your limit.
+
+The cap is compared against the **total price of each listed booking option**: Google's round-trip
+total for a round-trip ticket, or the summed price of the cheapest outbound plus the cheapest
+return for a two-separate-one-ways (or open-jaw) combo. It is not a per-leg or per-adult limit.
+All prices are for **one adult**, and no currency conversion is done — the number is interpreted
+in whatever currency the search was run with.
+
+It applies everywhere: the headline picks, the ranked list, the per-date and per-airport tables,
+the booking-style comparison card, browser notifications, archived automation runs and saved
+searches. The result header shows the cap and how many over-cap options were hidden, and the
+plain-language note explains what was filtered. If nothing fits, the app says so and suggests
+raising the cap or loosening the other criteria. Saved searches and automations store the cap with
+their criteria, so re-running one restores it automatically.
+
+**Does it make searches faster? Not the main sweep.** Unlike the weekday filter, a price cap
+cannot tell the app to skip an airport/date lookup: the price of a slot is only known **after**
+that slot has been looked up, so every route and date still has to be fetched to learn whether it
+is under your limit. The cap does save work **after** prices are in — it trims the extra
+**return-direction** lookups spent on flights that would be displayed (fewer over-cap flights are
+displayed, so fewer return details are fetched), and it can skip the return lookup inside a
+one-way/open-jaw task when the cheapest outbound already exceeds the cap. In practice the main
+grid sweep dominates the runtime, so a price cap is a **result filter**, not a meaningful speed-up
+— use a free reader API key, a narrower window or the weekday filter if you want a faster run.
+
 ## Cross-check on other sites (Google Flights, Kiwi.com, Skyscanner, Gotogate)
 
 The app prices from Google Flights, and Google's own result list is also where the travel agents —
@@ -222,8 +255,8 @@ you can browse or export.
 Open the **Automations** card below the search form and:
 
 1. Fill the search form with the criteria you want (route, stay, date window, ticket type,
-   direct-only, currency, …). This is the **only** place criteria are chosen: an automation always
-   uses the main form's criteria exactly as they stand when it is saved.
+   direct-only, maximum price, currency, …). This is the **only** place criteria are chosen: an
+   automation always uses the main form's criteria exactly as they stand when it is saved.
 2. In the Automations card set a **name**, an **interval** (15/30 minutes, hours, or days) and —
    optionally — an **“only run between”** band, e.g. `08:00`–`22:00` so it never fires at night.
 3. Press **Save automation using current main form criteria**.
@@ -272,9 +305,9 @@ automatically, so **export first** if you want to keep them.
 ## Saved searches (favorites)
 
 A **saved search** is a whole result set parked exactly as it came back — every flight, price and
-the criteria that produced it — so you can look at it again later, or re-run it with the identical
-parameters. It is the "I want to keep this one" side of a search, next to the Automations "run it
-again on a schedule" side.
+the criteria that produced it (including any maximum price) — so you can look at it again later,
+or re-run it with the identical parameters. It is the "I want to keep this one" side of a search,
+next to the Automations "run it again on a schedule" side.
 
 **Parking a search.** Finish a search (or open an archived automation run) and press the save
 button above the results:
@@ -302,8 +335,9 @@ narrows the list by destination, month, search date, source or criteria text.
 
 - **Show results** — opens it on its own full-screen page, rendering the stored list exactly as it
   came back, with a **← Back to main screen** button. Prices are a snapshot: live prices move on.
-- **Search again (same criteria)** — restores the exact criteria into the form and starts a **new**
-  search right away, so a saved search and a hand-made one behave identically from there on.
+- **Search again (same criteria)** — restores the exact criteria into the form (maximum price
+  included) and starts a **new** search right away, so a saved search and a hand-made one behave
+  identically from there on.
 - **Delete** — removes just that saved search (asks first).
 
 **Managing them.** **Export all (JSON)** downloads every saved search as a JSON file, **Import
@@ -419,8 +453,9 @@ python -m http.server 8000 --directory docs
   is spread evenly). The result header always states exactly what was covered
   (`Coverage: N/M airport pairs · N/M departure dates · N/M stay lengths`), and when everything
   fitted it states that the sweep was **exhaustive** and that the cheapest option listed is the
-  cheapest on offer. Raise the lookup budget in ⚙️ settings to cover more; paste a free reader API
-  key to make any of it much faster.
+  cheapest on offer (or the cheapest at or under your maximum price, when a cap is set). Raise the
+  lookup budget in ⚙️ settings to cover more; paste a free reader API key to make any of it much
+  faster.
 - **Round-trip detail.** Google's round-trip page returns its round-trip total price but lists
   only the **outbound** itinerary. The app therefore fetches the **return direction separately**
   (one extra lookup per return date, de-duplicated) and shows the cheapest return on that date
@@ -436,6 +471,12 @@ python -m http.server 8000 --directory docs
   sweep easy to spot.
 - **Direct-only.** Tick *Direct flights only (nonstop)* to restrict every lookup (outbound and
   return) to nonstop itineraries.
+- **Maximum price filters results, not the sweep.** A max-price cap removes over-cap tickets from
+  every results section, but prices are only known after a slot has been looked up, so it cannot
+  reduce the number of airport/date lookups in the main grid. It does avoid some **return-detail**
+  lookups (fewer displayed flights, and one-way/open-jaw return directions are skipped when the
+  cheapest outbound already busts the cap). If no ticket fits, the cap is applied to an otherwise
+  complete sweep, so raising it does not require re-running to discover new cheap dates.
 - **Background searches have browser limits.** A sweep keeps its full pace while the tab is
   hidden on desktop browsers (helped by the inaudible keep-alive audio, which you can switch off).
   Phones throttle or **suspend** background tabs entirely — iOS stops JavaScript in a backgrounded
@@ -470,17 +511,20 @@ Earlier versions of this app used a Flask backend (`app.py`) that scrapes Google
 backend (Docker, Vercel, a VPS, …) — see `Dockerfile`, `requirements.txt` and `vercel.json` —
 but it is **no longer required**: the GitHub Pages app above is fully self-contained.
 
-### ⚠️ The Python backend does **not** have the "ticket type" or "departure weekday" features yet
+### ⚠️ The Python backend lacks "ticket type", "departure weekday" and "max price"
 
-The static app (`docs/`) gained a **Round-trip vs. two separate one-ways** comparison and a
-**departure-weekday filter**, but `app.py` + `templates/index.html` were intentionally left
-untouched (it is the legacy path). **Saved searches** are likewise a static-app feature only: they
-need no backend at all (they are `localStorage` in `docs/app.js`), so the legacy
-`templates/index.html` does not have them. If you ever want the Flask backend to match the other
-two, here is exactly what to change — the static app is the reference implementation, so mirror it
-rather than inventing a new design. (For the weekday filter specifically: accept a `depart_days`
-array of `0`–`6` weekday indices in `api_search()`, and when building the sampled outbound dates,
-skip any date whose `date.weekday()` is not in that set — mirroring `runSearch()` in `docs/app.js`.)
+The static app (`docs/`) gained a **Round-trip vs. two separate one-ways** comparison, a
+**departure-weekday filter** and an optional **maximum ticket price**, but `app.py` +
+`templates/index.html` were intentionally left untouched (it is the legacy path). **Saved
+searches** are likewise a static-app feature only: they need no backend at all (they are
+`localStorage` in `docs/app.js`), so the legacy `templates/index.html` does not have them. If you
+ever want the Flask backend to match the other two, here is exactly what to change — the static app
+is the reference implementation, so mirror it rather than inventing a new design. (For the weekday
+filter specifically: accept a `depart_days` array of `0`–`6` weekday indices in `api_search()`, and
+when building the sampled outbound dates, skip any date whose `date.weekday()` is not in that set —
+mirroring `runSearch()` in `docs/app.js`. For the price cap: accept a `max_price` number in
+`api_search()`, treat blank/`0` as no cap, and drop any record whose total `price` exceeds it
+*after* the sweep but before summaries/rendering — mirroring `withinPriceCap()` in `docs/app.js`.)
 
 **Concept.** A *round-trip ticket* is a single booking priced from Google's round-trip response.
 *Two separate one-ways* is the sum of the cheapest one-way in each direction (often two different

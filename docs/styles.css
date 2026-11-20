@@ -467,6 +467,7 @@ details summary::-webkit-details-marker { display: none; }
   color: var(--muted);
 }
 .coverage-complete { color: var(--accent2); }
+.price-cap { color: var(--warn); }
 .window-note { color: var(--muted); }
 
 /* ---- animated brand icon (header) ---- */
