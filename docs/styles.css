@@ -468,6 +468,7 @@ details summary::-webkit-details-marker { display: none; }
 }
 .coverage-complete { color: var(--accent2); }
 .price-cap { color: var(--warn); }
+.via-country { color: var(--warn); }
 .window-note { color: var(--muted); }
 
 /* ---- animated brand icon (header) ---- */
@@ -718,12 +719,27 @@ body.searching .logo-arc { animation-duration: 0.7s; }
   border-left: 2px solid var(--border);
   padding-left: 0.7rem;
 }
+.saved-month > summary,
+.saved-day > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.4rem;
+}
+.saved-month > summary::-webkit-details-marker,
+.saved-day > summary::-webkit-details-marker { display: none; }
 .saved-month-head {
   font-size: 0.8rem;
   font-weight: 700;
   color: var(--accent);
   margin-bottom: 0.35rem;
 }
+.saved-month-title::before,
+.saved-day > summary::before { content: "▸ "; color: var(--muted); }
+.saved-month[open] .saved-month-title::before,
+.saved-day[open] > summary::before { content: "▾ "; }
 .saved-count {
   display: inline-block;
   margin-left: 0.3rem;

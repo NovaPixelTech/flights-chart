@@ -1087,6 +1087,113 @@ async function searchOneWayCombo(task, currency, cap) {
   }];
 }
 
+/* ---------- cheapest flight via a stopover inside the destination country ---------- */
+// The long flight into (and out of) the gateway must be DIRECT; the short hop
+// inside the destination country may use the normal stop allowance. The two are
+// separate tickets (a self-transfer), so a minimum connection window is needed.
+const STOPOVER_MIN_CONNECT_MIN = 120; // 2 hours between arrival and the internal departure
+const STOPOVER_MAX_CONNECT_MIN = 24 * 60; // at most a 24-hour connection
+const STOPOVER_GATEWAYS = 5;          // top N major airports of the country
+
+/** Major airports of `dest`'s country, excluding `dest` itself, capped to N.
+ *  Returns [] when the destination country is not in the gateway table. */
+function stopoverGateways(dest, limit) {
+  const key = Object.keys(COUNTRY_AIRPORTS).find((k) =>
+    Array.isArray(COUNTRY_AIRPORTS[k]) && COUNTRY_AIRPORTS[k].indexOf(dest) !== -1);
+  if (!key) return [];
+  return COUNTRY_AIRPORTS[key].filter((c) => c !== dest).slice(0, limit || STOPOVER_GATEWAYS);
+}
+
+/** Minutes between the arrival of `first` and the departure of `second`
+ *  at the same airport (both are in that airport's local time). */
+function connectGapMinutes(first, second) {
+  if (!first || !second || !first.legs || !second.legs || !first.legs.length || !second.legs.length) return null;
+  const arr = first.legs[first.legs.length - 1];
+  const dep = second.legs[0];
+  const a = _dtMs(arr.arr_date, arr.arr_time);
+  const d = _dtMs(dep.dep_date, dep.dep_time);
+  return (a == null || d == null) ? null : Math.round((d - a) / 60000);
+}
+
+/** Cheapest inbound+internal pair that actually connects in time at the gateway.
+ *  Prices are total per booking option; `cap` (when set) prunes over-cap pairs. */
+function cheapestConnectingPair(inbound, internal, cap) {
+  const usable = (d) => d && d.price != null && d.legs && d.legs.length;
+  const a = (inbound || []).filter(usable);
+  const b = (internal || []).filter(usable);
+  let best = null;
+  for (const first of a) {
+    for (const second of b) {
+      const price = first.price + second.price;
+      if (cap != null && price > cap) continue;
+      if (best && price >= best.price) continue;
+      const gap = connectGapMinutes(first, second);
+      if (gap == null || gap < STOPOVER_MIN_CONNECT_MIN || gap > STOPOVER_MAX_CONNECT_MIN) continue;
+      best = { price, first, second, gap };
+    }
+  }
+  return best;
+}
+
+/**
+ * A self-transfer itinerary via a major airport of the destination country:
+ *   origin → gateway (direct) + gateway → final airport (internal), and the
+ *   mirror image on the return. Both directions are combined into one record so
+ *   it can be compared directly with a round-trip / two-one-way ticket.
+ */
+async function searchCountryStopover(task, currency, cap) {
+  const gateways = task.gateways || [];
+  if (!gateways.length) return [];
+  const maxStops = task.maxStops != null ? task.maxStops : 2;
+
+  const legPair = async (from, to, date) => {
+    const results = await Promise.all(gateways.map(async (g) => {
+      const [inbound, internal] = await Promise.all([
+        fetchOneWayOptions(from, g, date, 0, currency),       // direct to/from the gateway
+        fetchOneWayOptions(g, to, date, maxStops, currency),  // internal flight in the country
+      ]);
+      const pair = cheapestConnectingPair(inbound, internal, cap);
+      return pair ? { gate: g, ...pair } : null;
+    }));
+    return results.reduce((best, p) => (p && (!best || p.price < best.price) ? p : best), null);
+  };
+
+  const bestOut = await legPair(task.origin, task.dest, task.outbound);
+  if (!bestOut) return [];
+  const bestRet = await legPair(task.dest, task.origin, task.ret);
+  if (!bestRet) return [];
+  const total = bestOut.price + bestRet.price;
+  if (cap != null && total > cap) return [];
+
+  const outLegs = bestOut.first.legs.concat(bestOut.second.legs);
+  const retLegs = bestRet.first.legs.concat(bestRet.second.legs);
+  const lays = (p) => [].concat(p.first.layovers_min || [], p.gap, p.second.layovers_min || []);
+  const airlines = (p) => [].concat(p.first.airlines || [], p.second.airlines || []);
+  return [{
+    price: total,
+    airlines: Array.from(new Set(airlines(bestOut).concat(airlines(bestRet)))),
+    stops: Math.max(0, outLegs.length - 1),
+    legs: outLegs,
+    layovers_min: lays(bestOut),
+    total_duration_min: outLegs.reduce((s, l) => s + (l.duration_min || 0), 0),
+    return_legs: retLegs,
+    return_airlines: bestRet.first.airlines.concat(bestRet.second.airlines || []),
+    return_stops: Math.max(0, retLegs.length - 1),
+    return_layovers_min: lays(bestRet),
+    return_duration_min: retLegs.reduce((s, l) => s + (l.duration_min || 0), 0),
+    origin_airport: task.origin,
+    dest_airport: task.dest,
+    return_airport: task.origin,
+    outbound_date: task.outbound,
+    return_date: task.ret,
+    stay_days: task.stay,
+    ticket_type: "stopover",
+    open_jaw: false,
+    via_airport: bestOut.gate,
+    return_via_airport: bestRet.gate,
+  }];
+}
+
 /**
  * Run the whole search. `params` mirrors the old backend payload.
  * `onProgress` is called after every completed lookup so the UI can stream.
@@ -1199,6 +1306,10 @@ async function runSearch(params, onProgress, opts) {
   const wantRoundTrip = ticketType !== "oneway";
   const wantOneWays = ticketType === "oneway" || ticketType === "both";
   const lookupsPerSlot = (wantRoundTrip ? 1 : 0) + (wantOneWays ? 1 : 0);
+  // Optional third comparison: cheapest trip via a stopover inside the
+  // destination country. It is a separate, self-transfer itinerary built from
+  // one-way lookups, so it does not change the bookings counted above.
+  const viaCountry = !!params.via_country;
 
   // ---- plan the sweep ----
   // One "route" = an origin→destination airport pair × a stay length; one
@@ -1298,11 +1409,24 @@ async function runSearch(params, onProgress, opts) {
     if (wantOneWays) out.push(owTask(origin, dest, outbound, stay));
     return out;
   };
+  // A via-country stopover task tries each gateway in both directions, with a
+  // direct leg and an internal leg each way — four one-way lookups per gateway.
+  // Kept on a few spread dates only so the extra cost stays bounded.
+  const stopoverTask = (origin, dest, outbound, stay) => {
+    if (!viaCountry) return null;
+    const gateways = stopoverGateways(dest, STOPOVER_GATEWAYS);
+    if (!gateways.length) return null;
+    return {
+      kind: "so", origin, dest, outbound, stay,
+      ret: isoLocal(addDays(parseISODate(outbound), stay)),
+      gateways, maxStops: maxStopsForSearch,
+    };
+  };
   // A separate-one-way lookup makes two reader requests (one per direction), a
   // round-trip lookup one; used for the ETA. Open-jaw is also two directions.
-  // With a price cap some second directions are skipped, so this is an upper
-  // bound and the ETA errs on the safe side.
-  const taskFetches = (t) => (t.kind === "rt" ? 1 : 2);
+  // A stopover task makes four per gateway. With a price cap some directions
+  // are skipped, so these are upper bounds and the ETA errs on the safe side.
+  const taskFetches = (t) => (t.kind === "rt" ? 1 : t.kind === "so" ? 4 * (t.gateways || []).length : 2);
 
   // ---- resume support: a long exhaustive sweep may outlive the tab ----
   // Progress is checkpointed in localStorage, and a resumed run skips the
@@ -1315,7 +1439,9 @@ async function runSearch(params, onProgress, opts) {
   const finishedKeys = new Set(alreadyDone);
   const taskId = (t) => (t.kind === "oj"
     ? `oj|${t.o_out}|${t.o_ret}|${t.dest}|${t.outbound}|${t.stay}`
-    : `${t.kind}|${sweepKey(t.origin, t.dest, t.stay, t.outbound)}`);
+    : t.kind === "so"
+      ? `so|${sweepKey(t.origin, t.dest, t.stay, t.outbound)}`
+      : `${t.kind}|${sweepKey(t.origin, t.dest, t.stay, t.outbound)}`);
   const pendingOnly = (list) => (alreadyDone.size ? list.filter((t) => !alreadyDone.has(taskId(t))) : list);
 
   // ---- pass 1: broad grid, every route on its broad dates ----
@@ -1332,6 +1458,21 @@ async function runSearch(params, onProgress, opts) {
     for (const pair of routePairs) {
       for (const p of stayPlan) {
         if (broadSetFor.get(p.stay).has(outbound)) broadTasks.push(...slotTasks(pair[0], pair[1], outbound, p.stay));
+      }
+    }
+  }
+  // Via-country stopovers are an extra comparison, not part of the main grid's
+  // coverage. Sample a few spread dates for the top pairs so the four-per-
+  // gateway lookups stay bounded even on an exhaustive sweep.
+  if (viaCountry) {
+    const soDates = new Set(spreadFromList(broadDatesUnion, 4));
+    for (const outbound of bisectionOrder(Array.from(soDates))) {
+      for (const pair of routePairs.slice(0, 3)) {
+        for (const p of stayPlan) {
+          if (!soDates.has(outbound)) continue;
+          const t = stopoverTask(pair[0], pair[1], outbound, p.stay);
+          if (t) broadTasks.push(t);
+        }
       }
     }
   }
@@ -1504,7 +1645,9 @@ async function runSearch(params, onProgress, opts) {
             ? await searchOpenJaw(task, currency, maxPrice)
             : task.kind === "ow"
               ? await searchOneWayCombo(task, currency, maxPrice)
-              : await searchOneRoute(task, currency, { withReturn: false });
+              : task.kind === "so"
+                ? await searchCountryStopover(task, currency, maxPrice)
+                : await searchOneRoute(task, currency, { withReturn: false });
           for (const f of found) record(f);
           finishedKeys.add(taskId(task));
           if (++sinceCheckpoint >= CHECKPOINT_EVERY) { sinceCheckpoint = 0; checkpoint(); }
@@ -1637,12 +1780,14 @@ async function runSearch(params, onProgress, opts) {
   // Split by booking style so each can be reported in its own section. Open-jaw
   // is also two separate tickets (different airports), so it rides with the
   // separate-one-way group and is labelled as such per row.
-  const roundTripOpts = visible.filter((r) => !r.open_jaw && r.ticket_type !== "oneway");
-  const oneWayOpts = visible.filter((r) => r.open_jaw || r.ticket_type === "oneway");
+  const stopoverOpts = visible.filter((r) => r.ticket_type === "stopover");
+  const roundTripOpts = visible.filter((r) => !r.open_jaw && r.ticket_type !== "oneway" && r.ticket_type !== "stopover");
+  const oneWayOpts = visible.filter((r) => (r.open_jaw || r.ticket_type === "oneway") && r.ticket_type !== "stopover");
   const cheapestRoundTrip = roundTripOpts[0] || null;
   const cheapestRoundTripDirect = roundTripOpts.find((r) => _isDirectOption(r)) || null;
   const cheapestOneWay = oneWayOpts[0] || null;
   const cheapestOneWayDirect = oneWayOpts.find((r) => _isDirectOption(r)) || null;
+  const cheapestStopover = stopoverOpts[0] || null;
 
   // cheapest option found for each outbound date we actually queried
   const perDate = {};
@@ -1797,8 +1942,11 @@ async function runSearch(params, onProgress, opts) {
     cheapest_roundtrip_direct: cheapestRoundTripDirect,
     cheapest_oneway: cheapestOneWay,
     cheapest_oneway_direct: cheapestOneWayDirect,
+    cheapest_stopover: cheapestStopover,
     has_roundtrip_results: roundTripOpts.length > 0,
     has_oneway_results: oneWayOpts.length > 0,
+    has_stopover_results: stopoverOpts.length > 0,
+    via_country: viaCountry,
     ranked_options: visible.slice(0, 50),
     per_date_summary: perDateList,
     per_origin_summary: perOriginList,
@@ -1841,6 +1989,15 @@ async function runSearch(params, onProgress, opts) {
           "baggage/change rules. "
         : "") +
       (params.direct_only ? "Only nonstop itineraries were requested. " : "") +
+      (viaCountry
+        ? `A third option looked for the cheapest self-transfer via a major airport of the destination ` +
+          `country (direct to the gateway, then an internal flight to your final airport, and the same on ` +
+          `the way back). Up to ${STOPOVER_GATEWAYS} gateways on a few spread dates were tried; the two legs ` +
+          `are separate tickets, so baggage and missed connections are the traveller's responsibility. ` +
+          (cheapestStopover
+            ? `Cheapest stopover found: ${cheapestStopover.price} ${currency} via ${cheapestStopover.via_airport}. `
+            : "No in-country stopover with a valid connection was found. ")
+        : "") +
       (dayFilter
         ? `Only outbound departures on ${departDaysLongLabel(departDays)} were searched, so departure dates ` +
           "on other weekdays were neither looked up nor listed. "
@@ -1860,6 +2017,7 @@ async function runSearch(params, onProgress, opts) {
  * ------------------------------------------------------------------ */
 /** Human label for how an option is booked. */
 function _ticketLabel(f) {
+  if (f.ticket_type === "stopover") return "In-country stopover (two tickets)";
   if (f.open_jaw) return "Open-jaw (two one-ways)";
   if (f.ticket_type === "oneway") return "Two one-way tickets";
   return "Round-trip ticket";
@@ -1991,7 +2149,7 @@ function _yymmdd(iso) {
  *  tickets and open-jaw returns are two searches and are linked per leg. */
 function _isRoundTripLink(f) {
   return !!(f && f.return_date && f.return_date !== f.outbound_date && !f.open_jaw &&
-    f.ticket_type !== "oneway" &&
+    f.ticket_type !== "oneway" && f.ticket_type !== "stopover" &&
     (f.return_airport || f.origin_airport) === f.origin_airport);
 }
 
@@ -2129,7 +2287,8 @@ function renderResults(data, where) {
     <span><strong>${data.origin_input}</strong> → <strong>${data.destination_input}</strong></span>
     <span>Airports: ${originList || "—"} → ${destList || "—"}</span>
     <span>Window <strong>${fmtDate(data.date_from)}</strong> – <strong>${fmtDate(data.date_to)}</strong> · Stay <strong>${data.min_days}–${data.max_days}</strong> days${data.window_mode === "depart" ? " · window = departure date" : " · whole trip inside the window"}</span>
-    ${data.ticket_type ? `<span>Ticket: <strong>${data.ticket_type === "both" ? "round-trip + two separate one-ways" : data.ticket_type === "oneway" ? "two separate one-ways" : "round-trip"}</strong></span>` : ""}
+    ${data.ticket_type ? `<span>Ticket: <strong>${data.ticket_type === "both" ? "round-trip + two separate one-ways" : data.ticket_type === "oneway" ? "two separate one-ways" : "round-trip"}${data.via_country ? " + in-country stopover" : ""}</strong></span>` : ""}
+    ${data.via_country ? `<span class="via-country">In-country stopover comparison: top 5 major airports as gateways · two separate tickets</span>` : ""}
     ${data.depart_days_label ? `<span>Departure day: <strong>${_esc(data.depart_days_label)}</strong> only</span>` : ""}
     ${data.direct_only ? `<span>Direct (nonstop) only</span>` : ""}
     ${data.max_price != null ? `<span class="price-cap">Max price <strong>${_esc(String(data.max_price))} ${_esc(data.currency || "")}</strong> · ${data.hidden_by_cap || 0} over-cap option${(data.hidden_by_cap || 0) === 1 ? "" : "s"} hidden</span>` : ""}
@@ -2173,6 +2332,14 @@ function renderResults(data, where) {
     if (rows.length) {
       bookSections.push(`<div class="section-title">Two separate one-way tickets — two bookings (cheapest out + cheapest back)</div>${rows.join("")}`);
     }
+  }
+  if (data.has_stopover_results && data.cheapest_stopover) {
+    const f = data.cheapest_stopover;
+    const via = f.via_airport ? ` via ${_esc(f.via_airport)}` : "";
+    const back = f.return_via_airport ? ` and ${_esc(f.return_via_airport)} back` : "";
+    bookSections.push(`<div class="section-title">In-country stopover — two self-transfer tickets (direct to a gateway, then internal${via}${back})</div>` +
+      renderFlight(f, "best-stops", "Stopover · cheapest") +
+      `<div class="resolve-hint">Two separate bookings: a missed inbound flight can cost you the internal one, and bags are usually not checked through.</div>`);
   }
   html += bookSections.join("");
 
@@ -2605,6 +2772,8 @@ function applyParamsToForm(p) {
   setDepartDays(p.depart_days);
   const dc = $("direct_only");
   if (dc) dc.checked = !!p.direct_only;
+  const vc = $("via_country");
+  if (vc) vc.checked = !!p.via_country;
   syncDateBounds(false);
 }
 
@@ -2628,6 +2797,7 @@ function readFormParams() {
     open_jaw: $("open_jaw").value === "true",
     ticket_type: $("ticket_type") ? $("ticket_type").value : "roundtrip",
     direct_only: $("direct_only") ? $("direct_only").checked : false,
+    via_country: $("via_country") ? $("via_country").checked : false,
     depart_days: readDepartDays(),
   };
 }
@@ -2830,6 +3000,7 @@ function autoCriteriaText(p) {
   const cap = ticketPriceCap(p);
   if (cap != null) bits.push(`max ${cap} ${_esc(p.currency || "")}`.trim());
   if (p.direct_only) bits.push("direct only");
+  if (p.via_country) bits.push("in-country stopover");
   if (p.open_jaw) bits.push("open-jaw allowed");
   const ddLabel = departDaysLabel(p.depart_days);
   if (ddLabel) bits.push("departs " + ddLabel);
@@ -2861,12 +3032,14 @@ function summarizeRun(data) {
   if (!data) return null;
   const rt = data.cheapest_roundtrip || data.cheapest_roundtrip_direct || null;
   const ow = data.cheapest_oneway || data.cheapest_oneway_direct || null;
+  const so = data.cheapest_stopover || null;
   const ranked = data.ranked_options || [];
   return {
     currency: data.currency,
     count: data.all_results_count || 0,
     roundtrip: _summaryPick(rt, data.currency),
     oneway: _summaryPick(ow, data.currency),
+    stopover: _summaryPick(so, data.currency),
     best: _summaryPick(ranked[0], data.currency) || _summaryPick(rt, data.currency) ||
       _summaryPick(ow, data.currency),
     lookups: data.searches_performed || 0,
@@ -3714,6 +3887,7 @@ function savedCriteriaText(p) {
     p.date_mode === "every" ? "exhaustive" : "sampled",
     departDaysLongLabel(p.depart_days),
     p.direct_only ? "direct only" : "",
+    p.via_country ? "in-country stopover" : "",
     p.open_jaw ? "open-jaw" : "",
   ];
   return bits.filter(Boolean).join(" ").toLowerCase();
@@ -3951,6 +4125,18 @@ function savedGroups(items) {
   return dests;
 }
 
+/** Most recent save time anywhere under a month (or a whole destination). */
+function savedBranchLatest(node) {
+  let latest = 0;
+  if (node.days) {
+    node.days.forEach((arr) => arr.forEach((e) => { latest = Math.max(latest, e.savedAt || 0); }));
+  } else if (node.months) {
+    node.months.forEach((m) => { latest = Math.max(latest, savedBranchLatest(m)); });
+  }
+  return latest;
+}
+const _savedNewestFirst = (a, b) => savedBranchLatest(b) - savedBranchLatest(a);
+
 function renderSaved() {
   const list = $("savedList");
   if (!list) return;
@@ -3971,12 +4157,16 @@ function renderSaved() {
     return;
   }
 
+  // destination → departure month → search date: a collapsible tree at every
+  // level. Each level is ordered by its most recent save, so the newest
+  // searches always sit at the top, and every level starts open so they are
+  // displayed straight away.
   const groups = savedGroups(items);
   let html = "";
-  groups.forEach((g) => {
+  Array.from(groups.values()).sort(_savedNewestFirst).forEach((g) => {
     let n = 0;
     g.months.forEach((m) => m.days.forEach((arr) => { n += arr.length; }));
-    const months = Array.from(g.months.values()).sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+    const months = Array.from(g.months.values()).sort(_savedNewestFirst);
     html += `<details class="saved-group" open>
       <summary class="saved-group-head">
         <span class="saved-group-title">${_esc(g.label)}</span>
@@ -3986,16 +4176,16 @@ function renderSaved() {
     months.forEach((m) => {
       let mn = 0;
       m.days.forEach((arr) => { mn += arr.length; });
-      html += `<div class="saved-month">
-        <div class="saved-month-head">${_esc(m.label)} <span class="saved-count">${mn}</span></div>`;
+      html += `<details class="saved-month" open>
+        <summary class="saved-month-head"><span class="saved-month-title">${_esc(m.label)}</span> <span class="saved-count">${mn}</span></summary>`;
       Array.from(m.days.keys()).sort().reverse().forEach((dk) => {
         const arr = m.days.get(dk).slice().sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
-        html += `<div class="saved-day">
-          <div class="saved-day-head">${_esc(savedDayLabel(arr[0].savedAt))} · searched on this day</div>
+        html += `<details class="saved-day" open>
+          <summary class="saved-day-head">${_esc(savedDayLabel(arr[0].savedAt))} · searched on this day <span class="saved-count">${arr.length}</span></summary>
           ${arr.map(savedItemHtml).join("")}
-        </div>`;
+        </details>`;
       });
-      html += `</div>`;
+      html += `</details>`;
     });
     html += `</div></details>`;
   });

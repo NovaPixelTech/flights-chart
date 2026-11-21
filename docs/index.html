@@ -46,7 +46,7 @@
         </svg>
         <span>Cheap Flights Finder</span>
       </h1>
-      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Max-price filter · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run · Saved searches park any result set, grouped by destination, departure month and search date</p>
+      <p>Live Google Flights prices · Country → all commercial airports · City → primary airport · Flexible dates &amp; stay length · Round-trip <em>or</em> two separate one-ways (compared) · Open-jaw supported · Direct-only filter · Departure-weekday filter · Max-price filter · In-country stopover comparison · Outbound <em>and</em> return details · Cross-check the cheapest options on Google Flights (Gotogate is listed there), Kiwi.com &amp; Skyscanner · Runs in the background and notifies you when it's done · Automations re-run a search on your schedule and archive every run · Saved searches park any result set, grouped by destination, departure month and search date</p>
       <div class="status-row">
         <span class="pill" id="dataPill"><span class="dot"></span><span id="dataPillText">data: live Google Flights</span></span>
         <span class="pill" id="airportPill"><span class="dot"></span><span id="airportPillText">airports: loading…</span></span>
@@ -169,6 +169,19 @@
               <input type="checkbox" id="direct_only" name="direct_only" />
               <span>Direct flights only (nonstop)</span>
             </label>
+          </div>
+          <div class="full">
+            <label class="inline-check" for="via_country">
+              <input type="checkbox" id="via_country" name="via_country" />
+              <span>Also compare a stopover inside the destination country</span>
+            </label>
+            <div class="resolve-hint">Instead of flying straight to your chosen city, look for the cheapest
+              <strong>direct</strong> flight from your origin airport(s) to a <strong>major airport of the same
+              country</strong>, then an internal flight from there to your final airport — a self-transfer with
+              one stopover in the destination country. The same is done on the way back. The top 5 major airports
+              of the country are tried as gateways; it adds extra lookups and is shown as a <strong>third
+              comparison</strong> alongside round-trip and two one-ways. Both legs are separate tickets, so
+              baggage and a missed connection are your responsibility.</div>
           </div>
         </div>
         <div class="actions">

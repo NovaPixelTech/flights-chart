@@ -9,8 +9,9 @@ are never conflated.
 Supports country inputs (expands to **every** commercial airport in that country — all of them
 are searched), explicit airport lists (`DUS, FRA, HAM`), flexible date windows, stay-length
 ranges, open-jaw (different return airport), a **departure-weekday filter** (e.g. only depart on
-Mondays), an optional **direct-only (nonstop)** filter, and an optional **maximum ticket price**
-(the most you will pay, in the selected currency).
+Mondays), an optional **direct-only (nonstop)** filter, an optional **maximum ticket price**
+(the most you will pay, in the selected currency), and an optional **in-country stopover comparison**
+(the cheapest self-transfer via a major airport of your destination country).
 Every result lists the **outbound and the return** flight (airport, `dd.mm.yyyy` date with the
 weekday, times, airline) plus the number of stay days. The results also carry a small card that
 **cross-checks the cheapest options on Google Flights (where Gotogate is listed), Kiwi.com and
@@ -207,6 +208,38 @@ one-way/open-jaw task when the cheapest outbound already exceeds the cap. In pra
 grid sweep dominates the runtime, so a price cap is a **result filter**, not a meaningful speed-up
 — use a free reader API key, a narrower window or the weekday filter if you want a faster run.
 
+## Cheapest flight via an in-country stopover
+
+Tick **Also compare a stopover inside the destination country** when your chosen city is not the
+only airport worth flying into. For example, flying to Athens can be much cheaper if you land at
+Thessaloniki (SKG) and take a short internal flight down to ATH. The app then looks for:
+
+1. the cheapest **direct** flight from your origin airport(s) to a **major airport of the
+   destination country** (a *gateway*), and
+2. an **internal flight** from that gateway to your final destination airport,
+
+with both directions handled the same way on the way home. The two are combined into one
+**self-transfer** itinerary with one stopover in the destination country, and reported as a
+**third comparison** alongside the round-trip and two-one-way sections. The cheapest valid
+combination wins — subject to every other criterion, including the maximum price.
+
+- **Gateways:** the top **5 major airports** of the destination country (excluding your final
+  airport), taken from the same country→airports table used for country inputs. If the country is
+  not in that table, the option simply produces no stopover results.
+- **Connection rule:** the internal flight must leave at least **2 hours** (and at most 24 hours)
+  after the inbound lands at the same gateway. Arrival and departure are both in gateway-local
+  time, so no time-zone conversion is needed.
+- **Extra lookups:** each stopover task makes four one-way lookups per gateway (two per direction).
+  To keep this bounded it is sampled on a few spread-out dates for the top airport pairs; it is an
+  extra comparison, not part of the main grid's coverage claims.
+- **Two separate tickets:** these are independent bookings, usually on different airlines. Bags are
+  generally **not checked through**, and a delayed inbound can make you miss the internal flight —
+  the traveller carries that risk. The result is labelled as such and is not linked as a single
+  round-trip on the price-comparison card.
+
+The option is stored as a criterion in automations and saved searches, so re-running either
+restores it. It is a static-app (`docs/`) feature only; the legacy Python backend does not have it.
+
 ## Cross-check on other sites (Google Flights, Kiwi.com, Skyscanner, Gotogate)
 
 The app prices from Google Flights, and Google's own result list is also where the travel agents —
@@ -255,7 +288,7 @@ you can browse or export.
 Open the **Automations** card below the search form and:
 
 1. Fill the search form with the criteria you want (route, stay, date window, ticket type,
-   direct-only, maximum price, currency, …). This is the **only** place criteria are chosen: an
+   direct-only, maximum price, in-country stopover, currency, …). This is the **only** place criteria are chosen: an
    automation always uses the main form's criteria exactly as they stand when it is saved.
 2. In the Automations card set a **name**, an **interval** (15/30 minutes, hours, or days) and —
    optionally — an **“only run between”** band, e.g. `08:00`–`22:00` so it never fires at night.
@@ -305,7 +338,7 @@ automatically, so **export first** if you want to keep them.
 ## Saved searches (favorites)
 
 A **saved search** is a whole result set parked exactly as it came back — every flight, price and
-the criteria that produced it (including any maximum price) — so you can look at it again later,
+the criteria that produced it (including any maximum price or stopover option) — so you can look at it again later,
 or re-run it with the identical parameters. It is the "I want to keep this one" side of a search,
 next to the Automations "run it again on a schedule" side.
 
@@ -328,7 +361,9 @@ on-screen result set cannot be parked twice; the next search clears it.
 3. **Search date** — the day you made the search (e.g. *Sun 15.11.2026*).
 
 So the same route searched on different days, or aimed at different months, stays easy to tell
-apart. Destination groups collapse and expand, everything is newest-first, and a **filter box**
+apart. **Every level of that tree collapses and expands** — click the destination, the month/year
+or the search-date heading to fold that branch away — and each level starts open, ordered
+**newest-first**, so the most recent searches are always at the top and on screen. A **filter box**
 narrows the list by destination, month, search date, source or criteria text.
 
 **Opening one.** Every saved search offers:
@@ -477,6 +512,11 @@ python -m http.server 8000 --directory docs
   lookups (fewer displayed flights, and one-way/open-jaw return directions are skipped when the
   cheapest outbound already busts the cap). If no ticket fits, the cap is applied to an otherwise
   complete sweep, so raising it does not require re-running to discover new cheap dates.
+- **In-country stopovers are self-transfers, and cost extra lookups.** The comparison samples a few
+  dates and the top 5 gateways of the destination country; each stopover task spends four one-way
+  lookups per gateway, so it lengthens a run. It needs a ≥2-hour same-day connection and only works
+  for countries in the built-in gateway table. The two legs are separate tickets — no through-
+  checked bags and no protection if the inbound is delayed.
 - **Background searches have browser limits.** A sweep keeps its full pace while the tab is
   hidden on desktop browsers (helped by the inaudible keep-alive audio, which you can switch off).
   Phones throttle or **suspend** background tabs entirely — iOS stops JavaScript in a backgrounded
@@ -511,20 +551,24 @@ Earlier versions of this app used a Flask backend (`app.py`) that scrapes Google
 backend (Docker, Vercel, a VPS, …) — see `Dockerfile`, `requirements.txt` and `vercel.json` —
 but it is **no longer required**: the GitHub Pages app above is fully self-contained.
 
-### ⚠️ The Python backend lacks "ticket type", "departure weekday" and "max price"
+### ⚠️ The Python backend lacks "ticket type", "departure weekday", "max price" and stopovers
 
 The static app (`docs/`) gained a **Round-trip vs. two separate one-ways** comparison, a
-**departure-weekday filter** and an optional **maximum ticket price**, but `app.py` +
-`templates/index.html` were intentionally left untouched (it is the legacy path). **Saved
-searches** are likewise a static-app feature only: they need no backend at all (they are
-`localStorage` in `docs/app.js`), so the legacy `templates/index.html` does not have them. If you
-ever want the Flask backend to match the other two, here is exactly what to change — the static app
-is the reference implementation, so mirror it rather than inventing a new design. (For the weekday
-filter specifically: accept a `depart_days` array of `0`–`6` weekday indices in `api_search()`, and
-when building the sampled outbound dates, skip any date whose `date.weekday()` is not in that set —
-mirroring `runSearch()` in `docs/app.js`. For the price cap: accept a `max_price` number in
-`api_search()`, treat blank/`0` as no cap, and drop any record whose total `price` exceeds it
-*after* the sweep but before summaries/rendering — mirroring `withinPriceCap()` in `docs/app.js`.)
+**departure-weekday filter**, an optional **maximum ticket price** and an optional **in-country
+stopover comparison**, but `app.py` + `templates/index.html` were intentionally left untouched (it
+is the legacy path). **Saved searches** are likewise a static-app feature only: they need no backend
+at all (they are `localStorage` in `docs/app.js`), so the legacy `templates/index.html` does not have
+them. If you ever want the Flask backend to match the other two, here is exactly what to change —
+the static app is the reference implementation, so mirror it rather than inventing a new design.
+(For the weekday filter specifically: accept a `depart_days` array of `0`–`6` weekday indices in
+`api_search()`, and when building the sampled outbound dates, skip any date whose `date.weekday()`
+is not in that set — mirroring `runSearch()` in `docs/app.js`. For the price cap: accept a
+`max_price` number in `api_search()`, treat blank/`0` as no cap, and drop any record whose total
+`price` exceeds it *after* the sweep but before summaries/rendering — mirroring `withinPriceCap()`
+in `docs/app.js`. For the stopover option: accept `via_country`, derive the top 5 gateways of the
+destination country, combine a direct leg with an internal leg in each direction subject to a
+≥2-hour same-day connection, and tag the record `ticket_type: "stopover"` — mirroring
+`searchCountryStopover()` in `docs/app.js`.)
 
 **Concept.** A *round-trip ticket* is a single booking priced from Google's round-trip response.
 *Two separate one-ways* is the sum of the cheapest one-way in each direction (often two different
