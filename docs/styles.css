@@ -399,6 +399,8 @@ table.results-table .rank-cell {
   font-weight: 600;
   width: 2rem;
 }
+table.results-table tr.gateway-used td { background: #164e6333; }
+table.results-table tr.gateway-used td:first-child { border-left: 3px solid var(--accent2); }
 .section-title {
   margin: 1.5rem 0 0.6rem;
   color: var(--muted);

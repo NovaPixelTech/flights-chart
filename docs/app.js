@@ -1094,6 +1094,10 @@ async function searchOneWayCombo(task, currency, cap) {
 const STOPOVER_MIN_CONNECT_MIN = 120; // 2 hours between arrival and the internal departure
 const STOPOVER_MAX_CONNECT_MIN = 24 * 60; // at most a 24-hour connection
 const STOPOVER_GATEWAYS = 5;          // top N major airports of the country
+// Gateway attempts are also kept outside the flight records so the results
+// table can still list what each gateway found when no complete itinerary made
+// it into the ranked list (e.g. every pair was over the price cap).
+const _gatewayAttemptLog = [];
 
 /** Major airports of `dest`'s country, excluding `dest` itself, capped to N.
  *  Returns [] when the destination country is not in the gateway table. */
@@ -1147,39 +1151,69 @@ async function searchCountryStopover(task, currency, cap) {
   const maxStops = task.maxStops != null ? task.maxStops : 2;
 
   const legPair = async (from, to, date) => {
-    const results = await Promise.all(gateways.map(async (g) => {
+    // Keep every gateway's attempt, not just the winner, so the results page can
+    // list how each gateway priced out (even ones with no valid connection).
+    const attempts = await Promise.all(gateways.map(async (g) => {
       const [inbound, internal] = await Promise.all([
         fetchOneWayOptions(from, g, date, 0, currency),       // direct to/from the gateway
         fetchOneWayOptions(g, to, date, maxStops, currency),  // internal flight in the country
       ]);
-      const pair = cheapestConnectingPair(inbound, internal, cap);
-      return pair ? { gate: g, ...pair } : null;
+      return { gate: g, pair: cheapestConnectingPair(inbound, internal, cap) };
     }));
-    return results.reduce((best, p) => (p && (!best || p.price < best.price) ? p : best), null);
+    const best = attempts
+      .filter((a) => a.pair)
+      .reduce((b, a) => (!b || a.pair.price < b.pair.price ? a : b), null);
+    return { attempts, best };
   };
 
-  const bestOut = await legPair(task.origin, task.dest, task.outbound);
-  if (!bestOut) return [];
-  const bestRet = await legPair(task.dest, task.origin, task.ret);
-  if (!bestRet) return [];
-  const total = bestOut.price + bestRet.price;
-  if (cap != null && total > cap) return [];
+  const out = await legPair(task.origin, task.dest, task.outbound);
+  const ret = await legPair(task.dest, task.origin, task.ret);
+  const bestOut = out.best, bestRet = ret.best;
+  const bestOutPair = bestOut && bestOut.pair, bestRetPair = bestRet && bestRet.pair;
+  const total = bestOutPair && bestRetPair ? bestOutPair.price + bestRetPair.price : null;
+  const gatewayResults = gateways.map((g) => {
+    const pairFor = (side) => {
+      const hit = side.attempts.find((a) => a.gate === g);
+      return hit && hit.pair ? hit.pair : null;
+    };
+    const outbound = pairFor(out), retn = pairFor(ret);
+    return {
+      gateway: g,
+      outbound,
+      return: retn,
+      total: outbound && retn ? outbound.price + retn.price : null,
+      used_outbound: !!(bestOut && bestOut.gate === g),
+      used_return: !!(bestRet && bestRet.gate === g),
+    };
+  });
+  const logAttempts = () => {
+    for (const row of gatewayResults) {
+      _gatewayAttemptLog.push(Object.assign({}, row, {
+        origin: task.origin, dest: task.dest,
+        outbound_date: task.outbound, return_date: task.ret, stay_days: task.stay,
+      }));
+    }
+  };
+  if (!bestOut || !bestRet || (cap != null && total > cap)) {
+    logAttempts(); // nothing bookable, but the table should still show what was found
+    return [];
+  }
 
-  const outLegs = bestOut.first.legs.concat(bestOut.second.legs);
-  const retLegs = bestRet.first.legs.concat(bestRet.second.legs);
+  const outLegs = bestOutPair.first.legs.concat(bestOutPair.second.legs);
+  const retLegs = bestRetPair.first.legs.concat(bestRetPair.second.legs);
   const lays = (p) => [].concat(p.first.layovers_min || [], p.gap, p.second.layovers_min || []);
   const airlines = (p) => [].concat(p.first.airlines || [], p.second.airlines || []);
   return [{
     price: total,
-    airlines: Array.from(new Set(airlines(bestOut).concat(airlines(bestRet)))),
+    airlines: Array.from(new Set(airlines(bestOutPair).concat(airlines(bestRetPair)))),
     stops: Math.max(0, outLegs.length - 1),
     legs: outLegs,
-    layovers_min: lays(bestOut),
+    layovers_min: lays(bestOutPair),
     total_duration_min: outLegs.reduce((s, l) => s + (l.duration_min || 0), 0),
     return_legs: retLegs,
-    return_airlines: bestRet.first.airlines.concat(bestRet.second.airlines || []),
+    return_airlines: bestRetPair.first.airlines.concat(bestRetPair.second.airlines || []),
     return_stops: Math.max(0, retLegs.length - 1),
-    return_layovers_min: lays(bestRet),
+    return_layovers_min: lays(bestRetPair),
     return_duration_min: retLegs.reduce((s, l) => s + (l.duration_min || 0), 0),
     origin_airport: task.origin,
     dest_airport: task.dest,
@@ -1191,6 +1225,7 @@ async function searchCountryStopover(task, currency, cap) {
     open_jaw: false,
     via_airport: bestOut.gate,
     return_via_airport: bestRet.gate,
+    gateway_results: gatewayResults,
   }];
 }
 
@@ -1201,6 +1236,7 @@ async function searchCountryStopover(task, currency, cap) {
 async function runSearch(params, onProgress, opts) {
   window._stopRequested = false;
   _oneWayCache.clear(); // always quote fresh prices for a new search
+  _gatewayAttemptLog.length = 0;
   const origins = resolveLocations(params.origin);
   const dests = resolveLocations(params.destination);
   if (!origins.length) {
@@ -1789,6 +1825,53 @@ async function runSearch(params, onProgress, opts) {
   const cheapestOneWayDirect = oneWayOpts.find((r) => _isDirectOption(r)) || null;
   const cheapestStopover = stopoverOpts[0] || null;
 
+  // Detail rows for the extra "Per in-country gateway" table. One row per
+  // gateway per (route, outbound date), keeping the best valid pair seen; rows
+  // used by the cheapest stopover itinerary float to the top.
+  const gatewaySummary = [];
+  if (viaCountry) {
+    const byKey = new Map();
+    const addRow = (r, chosen) => {
+      const key = [r.origin, r.dest, r.outbound_date, r.gateway].join("|");
+      const row = {
+        gateway: r.gateway,
+        origin: r.origin,
+        dest: r.dest,
+        outbound_date: r.outbound_date,
+        return_date: r.return_date,
+        stay_days: r.stay_days,
+        outbound: r.outbound,
+        return: r.return,
+        total: r.total,
+        used_outbound: !!(chosen && r.used_outbound),
+        used_return: !!(chosen && r.used_return),
+      };
+      const prev = byKey.get(key);
+      const better = !prev ||
+        (row.total != null && (prev.total == null || row.total < prev.total)) ||
+        ((row.used_outbound || row.used_return) && !(prev.used_outbound || prev.used_return));
+      if (better) byKey.set(key, row);
+    };
+    for (const f of stopoverOpts) {
+      for (const g of (f.gateway_results || [])) {
+        addRow(Object.assign({}, g, {
+          origin: f.origin_airport, dest: f.dest_airport,
+          outbound_date: f.outbound_date, return_date: f.return_date, stay_days: f.stay_days,
+        }), cheapestStopover === f);
+      }
+    }
+    // Gateways whose lookups produced no bookable itinerary are still listed.
+    for (const r of _gatewayAttemptLog) addRow(r, false);
+    gatewaySummary.push(...byKey.values());
+    gatewaySummary.sort((a, b) => {
+      const au = (a.used_outbound || a.used_return) ? 0 : 1;
+      const bu = (b.used_outbound || b.used_return) ? 0 : 1;
+      const at = a.total == null ? 1e9 : a.total;
+      const bt = b.total == null ? 1e9 : b.total;
+      return au - bu || at - bt || String(a.gateway).localeCompare(String(b.gateway));
+    });
+  }
+
   // cheapest option found for each outbound date we actually queried
   const perDate = {};
   for (const f of visible) {
@@ -1950,6 +2033,7 @@ async function runSearch(params, onProgress, opts) {
     ranked_options: visible.slice(0, 50),
     per_date_summary: perDateList,
     per_origin_summary: perOriginList,
+    gateway_summary: gatewaySummary,
     all_results_count: visible.length,
     found_before_cap: all.length,
     max_price: maxPrice,
@@ -2126,6 +2210,20 @@ function _returnCell(f) {
       `<span class="dir-unavailable">${fmtDate(f.return_date)} · times/airline unavailable</span>`;
   }
   return `<span class="dir-unavailable">—</span>`;
+}
+
+/** One cell of the gateway table: the direct leg into/out of the gateway plus
+ *  the internal leg to/from the final airport, each with its own price. */
+function _gatewayPairCell(pair, cur) {
+  if (!pair) return `<span class="dir-unavailable">No valid connection</span>`;
+  const line = (opt, label) => {
+    const s = _dirSummary(opt.legs, opt.airlines, opt.stops);
+    if (!s) return "";
+    return `<div><span class="dir-unavailable">${label}:</span> <strong>${s.route}</strong> · ` +
+      `${s.date} · ${s.times} · ${s.airlines}${opt.price != null ? ` · ${opt.price} ${cur}` : ""}</div>`;
+  };
+  return line(pair.first, "Direct") + line(pair.second, "Internal") +
+    `<div class="dir-unavailable">Connection ${formatDuration(pair.gap)}</div>`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -2388,6 +2486,33 @@ function renderResults(data, where) {
         <td>${_dirCell(f.legs, f.airlines, f.stops)}</td>
         <td class="price-cell">${f.price != null ? f.price + " " + cur : "—"}</td>
         <td>${_returnCell(f)}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+
+  if (data.via_country && data.gateway_summary && data.gateway_summary.length) {
+    html += `<div class="section-title">Per in-country gateway (best found)</div>`;
+    html += `<div class="results-table-wrap"><table class="results-table"><thead><tr>
+      <th>Gateway</th><th>Route · outbound</th>
+      <th>Outbound via gateway (direct + internal)</th>
+      <th>Return via gateway (direct + internal)</th>
+      <th>Total</th><th>Status</th>
+    </tr></thead><tbody>`;
+    data.gateway_summary.forEach((g) => {
+      const used = g.used_outbound || g.used_return;
+      const route = `${g.origin || "—"} → ${g.dest || "—"}`;
+      const date = g.outbound_date ? ` · ${fmtDate(g.outbound_date)}` : "";
+      const status = used
+        ? "Included in cheapest"
+        : (g.total != null ? "Not used" : "No valid connection");
+      html += `<tr${used ? ' class="gateway-used"' : ""}>
+        <td><strong>${_esc(g.gateway || "—")}</strong></td>
+        <td>${route}${date}${g.stay_days != null ? ` · ${g.stay_days}d` : ""}</td>
+        <td>${_gatewayPairCell(g.outbound, cur)}</td>
+        <td>${_gatewayPairCell(g.return, cur)}</td>
+        <td class="price-cell">${g.total != null ? g.total + " " + cur : "—"}</td>
+        <td>${status}</td>
       </tr>`;
     });
     html += `</tbody></table></div>`;

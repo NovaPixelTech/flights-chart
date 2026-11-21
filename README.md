@@ -236,6 +236,12 @@ combination wins — subject to every other criterion, including the maximum pri
   generally **not checked through**, and a delayed inbound can make you miss the internal flight —
   the traveller carries that risk. The result is labelled as such and is not linked as a single
   round-trip on the price-comparison card.
+- **Per-gateway table:** when the option is on, a **Per in-country gateway (best found)** table is
+  shown just above *Per departure airport (best found)*. Every gateway tried gets a row (including
+  ones with no valid connection), with the direct leg, the internal leg, each leg's price and the
+  connection time in both directions, plus the gateway's combined total. Rows used by the cheapest
+  itinerary are highlighted and marked *Included in cheapest*; others read *Not used* or
+  *No valid connection*. This makes it easy to see *why* a particular gateway won.
 
 The option is stored as a criterion in automations and saved searches, so re-running either
 restores it. It is a static-app (`docs/`) feature only; the legacy Python backend does not have it.
